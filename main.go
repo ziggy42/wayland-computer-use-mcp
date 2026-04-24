@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -57,6 +58,11 @@ func main() {
 		mcp.WithDescription("Simulate typing a string of text"),
 		mcp.WithString("text", mcp.Description("Text to type"), mcp.Required()),
 	), typeTextHandler(p))
+
+	// Add System Info Tool
+	s.AddTool(mcp.NewTool("get_system_info",
+		mcp.WithDescription("Get information about the current system, OS, and desktop environment"),
+	), systemInfoHandler())
 
 	// Add Press Key Tool
 	s.AddTool(mcp.NewTool("press_key",
@@ -124,6 +130,36 @@ func scrollHandler(p *portal.Portal) server.ToolHandlerFunc {
 		}
 
 		return mcp.NewToolResultText("Scrolled successfully"), nil
+	}
+}
+
+func systemInfoHandler() server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		info := make(map[string]string)
+		info["os"] = runtime.GOOS
+		info["arch"] = runtime.GOARCH
+		info["desktop"] = os.Getenv("XDG_CURRENT_DESKTOP")
+		info["session_type"] = os.Getenv("XDG_SESSION_TYPE")
+
+		// Parse /etc/os-release
+		if data, err := os.ReadFile("/etc/os-release"); err == nil {
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				if strings.HasPrefix(line, "PRETTY_NAME=") {
+					info["distro"] = strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), "\"")
+				}
+			}
+		}
+
+		var sb strings.Builder
+		sb.WriteString("System Information:\n")
+		for k, v := range info {
+			if v != "" {
+				sb.WriteString(fmt.Sprintf("- %s: %s\n", k, v))
+			}
+		}
+
+		return mcp.NewToolResultText(sb.String()), nil
 	}
 }
 
