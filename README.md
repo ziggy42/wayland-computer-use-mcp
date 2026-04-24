@@ -30,7 +30,7 @@ A high-performance, self-contained MCP (Model Context Protocol) server for Linux
 ```bash
 git clone https://github.com/yourusername/wayland-computer-use-mcp
 cd wayland-computer-use-mcp
-go build -o wayland-mcp .
+go build -o wayland-computer-use-mcp .
 ```
 
 ## Usage
@@ -46,7 +46,7 @@ Add the following to your MCP configuration file:
 {
   "mcpServers": {
     "wayland": {
-      "command": "/path/to/wayland-mcp",
+      "command": "/path/to/wayland-computer-use-mcp",
       "env": {
         "DISPLAY": ":0",
         "WAYLAND_DISPLAY": "wayland-0"

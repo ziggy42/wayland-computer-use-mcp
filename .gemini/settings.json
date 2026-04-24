@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "wayland": {
-      "command": "./walyalnd-mcp",
+      "command": "./wayland-computer-use-mcp",
       "args": []
     }
   }
