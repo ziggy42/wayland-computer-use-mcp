@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -71,6 +72,12 @@ func main() {
 		mcp.WithString("modifiers", mcp.Description("Comma-separated modifiers (e.g., super, ctrl, alt, shift)")),
 	), pressKeyHandler(p))
 
+	// Add Wait Tool
+	s.AddTool(mcp.NewTool("wait",
+		mcp.WithDescription("Wait for a specified duration"),
+		mcp.WithNumber("seconds", mcp.Description("Number of seconds to wait"), mcp.Required()),
+	), waitHandler())
+
 	// Run Server
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -79,6 +86,18 @@ func main() {
 		log.Fatalf("Server error: %v", err)
 	}
 	<-ctx.Done()
+}
+
+func waitHandler() server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		seconds := request.GetFloat("seconds", 0)
+		if seconds <= 0 {
+			return mcp.NewToolResultError("Seconds must be greater than 0"), nil
+		}
+
+		time.Sleep(time.Duration(seconds * float64(time.Second)))
+		return mcp.NewToolResultText(fmt.Sprintf("Waited for %.2f seconds", seconds)), nil
+	}
 }
 
 func screenshotHandler(p *portal.Portal) server.ToolHandlerFunc {

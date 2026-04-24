@@ -14,6 +14,7 @@ A high-performance, self-contained MCP (Model Context Protocol) server for Linux
 | Tool | Description |
 | :--- | :--- |
 | `get_system_info` | Returns metadata about the current OS and desktop environment. |
+| `wait` | Waits for a specified number of seconds. |
 | `screenshot` | Captures the current screen and returns it as a PNG. |
 | `click` | Simulates mouse clicks at `(x, y)` coordinates (normalized 0.0 to 1.0). |
 | `scroll` | Simulates mouse wheel scrolling (horizontal/vertical). |
