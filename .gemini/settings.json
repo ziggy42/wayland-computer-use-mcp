@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "wayland": {
+      "command": "./walyalnd-mcp",
+      "args": []
+    }
+  }
+}
