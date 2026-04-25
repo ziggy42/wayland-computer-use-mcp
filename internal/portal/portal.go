@@ -38,7 +38,9 @@ const (
 )
 
 var (
-	ErrDimensionsUnknown   = errors.New("screen dimensions unknown; ensure portal session is active and screenshot has been taken")
+	ErrDimensionsUnknown = errors.New(
+		"screen dimensions unknown; ensure portal session is active and screenshot has been taken",
+	)
 	ErrInvalidResponseBody = errors.New("invalid response body")
 	ErrInvalidResultsType  = errors.New("invalid results type")
 	ErrSignalChannelClosed = errors.New("signal channel closed")
@@ -107,7 +109,8 @@ func (p *Portal) Screenshot() ([]byte, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(methodScreenshot, 0, "", options).Store(&requestPath); err != nil {
+	if err := object.Call(methodScreenshot, 0, "", options).
+		Store(&requestPath); err != nil {
 		return nil, fmt.Errorf("screenshot call failed: %w", err)
 	}
 
@@ -144,32 +147,47 @@ func (p *Portal) MovePointer(x, y float64) error {
 	object := p.connection.Object(portalDestination, portalPath)
 
 	// Try session-relative motion (stream 0)
-	err := object.Call(methodNotifyPointerMotionAbsolute, 0, p.session, map[string]dbus.Variant{}, uint32(0), absoluteX, absoluteY).Err
+	err := object.Call(
+		methodNotifyPointerMotionAbsolute, 0, p.session,
+		map[string]dbus.Variant{}, uint32(0), absoluteX, absoluteY,
+	).Err
 	if err == nil {
 		return nil
 	}
 
 	// Fallback: target a specific stream
 	s, relativeX, relativeY := p.findStream(absoluteX, absoluteY)
-	return object.Call(methodNotifyPointerMotionAbsolute, 0, p.session, map[string]dbus.Variant{}, s.id, relativeX, relativeY).Err
+	return object.Call(
+		methodNotifyPointerMotionAbsolute, 0, p.session,
+		map[string]dbus.Variant{}, s.id, relativeX, relativeY,
+	).Err
 }
 
 // Click simulates a mouse button press or release.
 func (p *Portal) Click(button, state uint32) error {
 	object := p.connection.Object(portalDestination, portalPath)
-	return object.Call(methodNotifyPointerButton, 0, p.session, map[string]dbus.Variant{}, int32(button), state).Err
+	return object.Call(
+		methodNotifyPointerButton, 0, p.session,
+		map[string]dbus.Variant{}, int32(button), state,
+	).Err
 }
 
 // Scroll simulates a mouse wheel scroll.
 func (p *Portal) Scroll(deltaX, deltaY float64) error {
 	object := p.connection.Object(portalDestination, portalPath)
 	if deltaX != 0 {
-		if err := object.Call(methodNotifyPointerAxis, 0, p.session, map[string]dbus.Variant{}, deltaX, 0.0).Err; err != nil {
+		if err := object.Call(
+			methodNotifyPointerAxis, 0, p.session,
+			map[string]dbus.Variant{}, deltaX, 0.0,
+		).Err; err != nil {
 			return err
 		}
 	}
 	if deltaY != 0 {
-		if err := object.Call(methodNotifyPointerAxis, 0, p.session, map[string]dbus.Variant{}, 0.0, deltaY).Err; err != nil {
+		if err := object.Call(
+			methodNotifyPointerAxis, 0, p.session,
+			map[string]dbus.Variant{}, 0.0, deltaY,
+		).Err; err != nil {
 			return err
 		}
 	}
@@ -179,7 +197,10 @@ func (p *Portal) Scroll(deltaX, deltaY float64) error {
 // TypeKey simulates a keyboard key press or release using a keysym.
 func (p *Portal) TypeKey(keysym, state uint32) error {
 	object := p.connection.Object(portalDestination, portalPath)
-	return object.Call(methodNotifyKeyboardKeysym, 0, p.session, map[string]dbus.Variant{}, int32(keysym), state).Err
+	return object.Call(
+		methodNotifyKeyboardKeysym, 0, p.session,
+		map[string]dbus.Variant{}, int32(keysym), state,
+	).Err
 }
 
 func (p *Portal) performHandshake() error {
@@ -244,7 +265,8 @@ func (p *Portal) createSession() (dbus.ObjectPath, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(methodCreateSession, 0, options).Store(&requestPath); err != nil {
+	if err := object.Call(methodCreateSession, 0, options).
+		Store(&requestPath); err != nil {
 		return "", fmt.Errorf("CreateSession call failed: %w", err)
 	}
 
@@ -271,7 +293,8 @@ func (p *Portal) requestSources() (dbus.ObjectPath, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(methodSelectSources, 0, p.session, options).Store(&requestPath); err != nil {
+	if err := object.Call(methodSelectSources, 0, p.session, options).
+		Store(&requestPath); err != nil {
 		return "", fmt.Errorf("SelectSources call failed: %w", err)
 	}
 
@@ -286,7 +309,8 @@ func (p *Portal) requestDevices() (dbus.ObjectPath, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(methodSelectDevices, 0, p.session, options).Store(&requestPath); err != nil {
+	if err := object.Call(methodSelectDevices, 0, p.session, options).
+		Store(&requestPath); err != nil {
 		return "", fmt.Errorf("SelectDevices call failed: %w", err)
 	}
 
@@ -300,7 +324,8 @@ func (p *Portal) requestStart() (dbus.ObjectPath, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(methodStart, 0, p.session, "", options).Store(&requestPath); err != nil {
+	if err := object.Call(methodStart, 0, p.session, "", options).
+		Store(&requestPath); err != nil {
 		return "", fmt.Errorf("Start call failed: %w", err)
 	}
 
@@ -383,7 +408,9 @@ func collectResponses(
 
 		code, ok := signal.Body[0].(uint32)
 		if !ok || code != 0 {
-			return nil, fmt.Errorf("portal request failed (path=%s, code=%d)", signal.Path, code)
+			return nil, fmt.Errorf(
+				"portal request failed (path=%s, code=%d)", signal.Path, code,
+			)
 		}
 
 		result, ok := signal.Body[1].(map[string]dbus.Variant)
