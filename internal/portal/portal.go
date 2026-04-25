@@ -45,15 +45,12 @@ const (
 )
 
 var (
-	ErrDimensionsUnknown = errors.New(
-		"screen dimensions unknown; ensure portal session is active and screenshot has been taken",
-	)
+	ErrDimensionsUnknown   = errors.New("screen dimensions unknown")
 	ErrInvalidResponseBody = errors.New("invalid response body")
 	ErrInvalidResultsType  = errors.New("invalid results type")
 	ErrSignalChannelClosed = errors.New("signal channel closed")
 	ErrNoUriInResponse     = errors.New("no uri in response")
 	ErrNoStreamsInResponse = errors.New("no streams found in start response")
-	ErrInvalidResponse     = errors.New("invalid results type")
 )
 
 // Portal manages a connection to the XDG Desktop Portal service via DBus.
@@ -177,23 +174,10 @@ func (p *Portal) Click(button, state uint32) error {
 
 // Scroll simulates a mouse wheel scroll.
 func (p *Portal) Scroll(deltaX, deltaY float64) error {
-	if deltaX != 0 {
-		if err := p.call(
-			methodNotifyPointerAxis, p.session,
-			map[string]dbus.Variant{}, deltaX, 0.0,
-		).Err; err != nil {
-			return err
-		}
-	}
-	if deltaY != 0 {
-		if err := p.call(
-			methodNotifyPointerAxis, p.session,
-			map[string]dbus.Variant{}, 0.0, deltaY,
-		).Err; err != nil {
-			return err
-		}
-	}
-	return nil
+	return p.call(
+		methodNotifyPointerAxis, p.session,
+		map[string]dbus.Variant{}, deltaX, deltaY,
+	).Err
 }
 
 // TypeKey simulates a keyboard key press or release using a keysym.
@@ -205,6 +189,9 @@ func (p *Portal) TypeKey(keysym, state uint32) error {
 }
 
 func (p *Portal) performHandshake() error {
+	// setupResponseListener is called before making requests to ensure we
+	// don't miss any response signals. waitForResponse uses its own
+	// listener independently for single-request flows.
 	signalChan, stopListening, err := p.setupResponseListener()
 	if err != nil {
 		return err
@@ -224,7 +211,9 @@ func (p *Portal) performHandshake() error {
 		return err
 	}
 
-	responses, err := collectResponses(signalChan, sourcesPath, devicesPath, startPath)
+	responses, err := collectResponses(
+		signalChan, sourcesPath, devicesPath, startPath,
+	)
 	if err != nil {
 		return err
 	}
@@ -239,22 +228,29 @@ func (p *Portal) performHandshake() error {
 		}
 	}
 
-	p.streams = parseStreams(rawStreams)
-	if len(p.streams) == 0 {
+	streams, err := parseStreams(rawStreams)
+	if err != nil {
+		return err
+	}
+	if len(streams) == 0 {
 		return ErrNoStreamsInResponse
 	}
+	p.streams = streams
 
-	// Calculate total dimensions from streams
-	for _, s := range p.streams {
-		if s.x+int32(s.w) > int32(p.width) {
-			p.width = uint32(s.x + int32(s.w))
+	p.width, p.height = totalBounds(p.streams)
+	return nil
+}
+
+func totalBounds(streams []stream) (width, height uint32) {
+	for _, s := range streams {
+		if right := uint32(s.x) + s.w; right > width {
+			width = right
 		}
-		if s.y+int32(s.h) > int32(p.height) {
-			p.height = uint32(s.y + int32(s.h))
+		if bottom := uint32(s.y) + s.h; bottom > height {
+			height = bottom
 		}
 	}
-
-	return nil
+	return
 }
 
 func (p *Portal) createSession() (dbus.ObjectPath, error) {
@@ -334,7 +330,7 @@ func (p *Portal) call(method string, args ...any) *dbus.Call {
 		Call(method, 0, args...)
 }
 
-func parseStreams(rawStreams [][]any) []stream {
+func parseStreams(rawStreams [][]any) ([]stream, error) {
 	var streams []stream
 	for _, streamData := range rawStreams {
 		if len(streamData) < 2 {
@@ -360,13 +356,12 @@ func parseStreams(rawStreams [][]any) []stream {
 				s.w, s.h = uint32(dims[0]), uint32(dims[1])
 			}
 		} else {
-			// TODO: The 'size' property is optional. If missing, we should detect
-			// dimensions from the actual screenshot or another reliable source.
+			return nil, fmt.Errorf("stream %d is missing required 'size' property", id)
 		}
 
 		streams = append(streams, s)
 	}
-	return streams
+	return streams, nil
 }
 
 func (p *Portal) waitForResponse(
@@ -382,14 +377,14 @@ func (p *Portal) waitForResponse(
 	if err != nil {
 		return nil, err
 	}
-	return responses[0], nil
+	return responses[requestPath], nil
 }
 
 func collectResponses(
 	signalChan chan *dbus.Signal,
 	paths ...dbus.ObjectPath,
-) ([]map[string]dbus.Variant, error) {
-	results := make([]map[string]dbus.Variant, 0, len(paths))
+) (map[dbus.ObjectPath]map[string]dbus.Variant, error) {
+	results := make(map[dbus.ObjectPath]map[string]dbus.Variant)
 	pending := make(map[dbus.ObjectPath]bool)
 	for _, path := range paths {
 		pending[path] = true
@@ -420,7 +415,7 @@ func collectResponses(
 			return nil, ErrInvalidResultsType
 		}
 
-		results = append(results, result)
+		results[signal.Path] = result
 		delete(pending, signal.Path)
 
 		if len(pending) == 0 {
@@ -462,10 +457,14 @@ func (p *Portal) findStream(
 		return stream{}, absoluteX, absoluteY
 	}
 
-	for _, s := range p.streams {
-		if int32(absoluteX) >= s.x && int32(absoluteX) < s.x+int32(s.w) &&
-			int32(absoluteY) >= s.y && int32(absoluteY) < s.y+int32(s.h) {
-			return s, absoluteX - float64(s.x), absoluteY - float64(s.y)
+	for _, candidate := range p.streams {
+		if int32(absoluteX) >= candidate.x &&
+			int32(absoluteX) < candidate.x+int32(candidate.w) &&
+			int32(absoluteY) >= candidate.y &&
+			int32(absoluteY) < candidate.y+int32(candidate.h) {
+			return candidate,
+				absoluteX - float64(candidate.x),
+				absoluteY - float64(candidate.y)
 		}
 	}
 
