@@ -11,10 +11,17 @@ import (
 )
 
 const (
+	// D-Bus addresses and interfaces
 	portalDestination = "org.freedesktop.portal.Desktop"
 	portalPath        = "/org/freedesktop/portal/desktop"
 
-	remoteDesktopInterface            = "org.freedesktop.portal.RemoteDesktop"
+	remoteDesktopInterface = "org.freedesktop.portal.RemoteDesktop"
+	screenCastInterface    = "org.freedesktop.portal.ScreenCast"
+	screenshotInterface    = "org.freedesktop.portal.Screenshot"
+	sessionInterface       = "org.freedesktop.portal.Session"
+	requestInterface       = "org.freedesktop.portal.Request"
+
+	// Method names
 	methodCreateSession               = remoteDesktopInterface + ".CreateSession"
 	methodSelectDevices               = remoteDesktopInterface + ".SelectDevices"
 	methodStart                       = remoteDesktopInterface + ".Start"
@@ -23,21 +30,17 @@ const (
 	methodNotifyPointerAxis           = remoteDesktopInterface + ".NotifyPointerAxis"
 	methodNotifyKeyboardKeysym        = remoteDesktopInterface + ".NotifyKeyboardKeysym"
 
-	screenCastInterface = "org.freedesktop.portal.ScreenCast"
 	methodSelectSources = screenCastInterface + ".SelectSources"
-
-	requestInterface = "org.freedesktop.portal.Request"
-	responseMember   = "Response"
-	signalResponse   = requestInterface + "." + responseMember
-
-	sessionInterface   = "org.freedesktop.portal.Session"
-	methodSessionClose = sessionInterface + ".Close"
-
-	screenshotInterface = "org.freedesktop.portal.Screenshot"
 	methodScreenshot    = screenshotInterface + ".Screenshot"
+	methodSessionClose  = sessionInterface + ".Close"
+
+	// Signals
+	responseMember = "Response"
+	signalResponse = requestInterface + "." + responseMember
 )
 
 const (
+	// Enum values
 	sourceTypeScreen   uint32 = 1
 	cursorModeEmbedded uint32 = 2
 	deviceTypeKeyboard uint32 = 1
@@ -49,7 +52,7 @@ var (
 	ErrInvalidResponseBody = errors.New("invalid response body")
 	ErrInvalidResultsType  = errors.New("invalid results type")
 	ErrSignalChannelClosed = errors.New("signal channel closed")
-	ErrNoUriInResponse     = errors.New("no uri in response")
+	ErrNoURIInResponse     = errors.New("no uri in response")
 	ErrNoStreamsInResponse = errors.New("no streams found in start response")
 )
 
@@ -59,8 +62,8 @@ var (
 type Portal struct {
 	connection *dbus.Conn
 	session    dbus.ObjectPath
-	width      uint32
-	height     uint32
+	width      int32
+	height     int32
 	streams    []stream
 }
 
@@ -88,10 +91,11 @@ func (p *Portal) InitSession() error {
 	}
 	p.session = sessionHandle
 
-	if err := p.performHandshake(); err != nil {
-		return fmt.Errorf("handshake failed: %w", err)
+	if err := p.startSession(); err != nil {
+		return fmt.Errorf("session startup failed: %w", err)
 	}
 
+	fmt.Fprintf(os.Stderr, "Portal initialized: %dx%d (%d streams)\n", p.width, p.height, len(p.streams))
 	return nil
 }
 
@@ -111,20 +115,27 @@ func (p *Portal) Screenshot() ([]byte, error) {
 		"interactive":  dbus.MakeVariant(false),
 	}
 
-	var requestPath dbus.ObjectPath
-	if err := p.call(methodScreenshot, "", options).
-		Store(&requestPath); err != nil {
-		return nil, fmt.Errorf("screenshot call failed: %w", err)
+	responses, err := p.awaitResponses(func() ([]dbus.ObjectPath, error) {
+		var requestPath dbus.ObjectPath
+		if err := p.call(methodScreenshot, "", options).
+			Store(&requestPath); err != nil {
+			return nil, err
+		}
+		return []dbus.ObjectPath{requestPath}, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("screenshot failed: %w", err)
 	}
 
-	response, err := p.waitForResponse(requestPath)
-	if err != nil {
-		return nil, err
+	var response map[string]dbus.Variant
+	for _, r := range responses {
+		response = r
+		break
 	}
 
 	uri, ok := response["uri"].Value().(string)
 	if !ok {
-		return nil, ErrNoUriInResponse
+		return nil, ErrNoURIInResponse
 	}
 
 	path := strings.TrimPrefix(uri, "file://")
@@ -188,32 +199,22 @@ func (p *Portal) TypeKey(keysym, state uint32) error {
 	).Err
 }
 
-func (p *Portal) performHandshake() error {
-	// setupResponseListener is called before making requests to ensure we
-	// don't miss any response signals. waitForResponse uses its own
-	// listener independently for single-request flows.
-	signalChan, stopListening, err := p.setupResponseListener()
-	if err != nil {
-		return err
-	}
-	defer stopListening()
-
-	sourcesPath, err := p.requestSources()
-	if err != nil {
-		return err
-	}
-	devicesPath, err := p.requestDevices()
-	if err != nil {
-		return err
-	}
-	startPath, err := p.requestStart()
-	if err != nil {
-		return err
-	}
-
-	responses, err := collectResponses(
-		signalChan, sourcesPath, devicesPath, startPath,
-	)
+func (p *Portal) startSession() error {
+	responses, err := p.awaitResponses(func() ([]dbus.ObjectPath, error) {
+		sourcesPath, err := p.requestSources()
+		if err != nil {
+			return nil, err
+		}
+		devicesPath, err := p.requestDevices()
+		if err != nil {
+			return nil, err
+		}
+		startPath, err := p.requestStart()
+		if err != nil {
+			return nil, err
+		}
+		return []dbus.ObjectPath{sourcesPath, devicesPath, startPath}, nil
+	})
 	if err != nil {
 		return err
 	}
@@ -241,12 +242,12 @@ func (p *Portal) performHandshake() error {
 	return nil
 }
 
-func totalBounds(streams []stream) (width, height uint32) {
+func totalBounds(streams []stream) (width, height int32) {
 	for _, s := range streams {
-		if right := uint32(s.x) + s.w; right > width {
+		if right := s.x + int32(s.w); right > width {
 			width = right
 		}
-		if bottom := uint32(s.y) + s.h; bottom > height {
+		if bottom := s.y + int32(s.h); bottom > height {
 			height = bottom
 		}
 	}
@@ -344,16 +345,16 @@ func parseStreams(rawStreams [][]any) ([]stream, error) {
 		}
 
 		s := stream{id: id}
-		if position, ok := options["position"]; ok {
-			var coords []int32
-			if err := position.Store(&coords); err == nil && len(coords) >= 2 {
+		if v, ok := options["position"]; ok {
+			if coords, ok := variantToInt32Slice(v); ok && len(coords) >= 2 {
 				s.x, s.y = coords[0], coords[1]
 			}
 		}
-		if size, ok := options["size"]; ok {
-			var dims []int32
-			if err := size.Store(&dims); err == nil && len(dims) >= 2 {
+		if v, ok := options["size"]; ok {
+			if dims, ok := variantToInt32Slice(v); ok && len(dims) >= 2 {
 				s.w, s.h = uint32(dims[0]), uint32(dims[1])
+			} else {
+				return nil, fmt.Errorf("stream %d has invalid 'size' property", id)
 			}
 		} else {
 			return nil, fmt.Errorf("stream %d is missing required 'size' property", id)
@@ -364,20 +365,48 @@ func parseStreams(rawStreams [][]any) ([]stream, error) {
 	return streams, nil
 }
 
+func variantToInt32Slice(v dbus.Variant) ([]int32, bool) {
+	var out []int32
+	if v.Store(&out) == nil {
+		return out, true
+	}
+	// Try as struct (ii) or similar
+	var s struct {
+		X, Y int32
+	}
+	if v.Store(&s) == nil {
+		return []int32{s.X, s.Y}, true
+	}
+	return nil, false
+}
+
 func (p *Portal) waitForResponse(
 	requestPath dbus.ObjectPath,
 ) (map[string]dbus.Variant, error) {
-	signalChan, stopListening, err := p.setupResponseListener()
-	if err != nil {
-		return nil, err
-	}
-	defer stopListening()
-
-	responses, err := collectResponses(signalChan, requestPath)
+	responses, err := p.awaitResponses(func() ([]dbus.ObjectPath, error) {
+		return []dbus.ObjectPath{requestPath}, nil
+	})
 	if err != nil {
 		return nil, err
 	}
 	return responses[requestPath], nil
+}
+
+func (p *Portal) awaitResponses(
+	issue func() ([]dbus.ObjectPath, error),
+) (map[dbus.ObjectPath]map[string]dbus.Variant, error) {
+	signalChan, stop, err := p.setupResponseListener()
+	if err != nil {
+		return nil, err
+	}
+	defer stop()
+
+	paths, err := issue()
+	if err != nil {
+		return nil, err
+	}
+
+	return collectResponses(signalChan, paths...)
 }
 
 func collectResponses(
@@ -478,6 +507,6 @@ func newToken(prefix string) string {
 	return prefix + strings.ReplaceAll(uuid.New().String(), "-", "")
 }
 
-func clamp[T ~float64 | ~int32](v, min_v, max_v T) T {
-	return min(max_v, max(min_v, v))
+func clamp(v, minV, maxV float64) float64 {
+	return min(maxV, max(minV, v))
 }
