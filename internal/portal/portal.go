@@ -95,7 +95,6 @@ func (p *Portal) InitSession() error {
 		return fmt.Errorf("session startup failed: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Portal initialized: %dx%d (%d streams)\n", p.width, p.height, len(p.streams))
 	return nil
 }
 
@@ -357,7 +356,7 @@ func parseStreams(rawStreams [][]any) ([]stream, error) {
 				return nil, fmt.Errorf("stream %d has invalid 'size' property", id)
 			}
 		} else {
-			return nil, fmt.Errorf("stream %d is missing required 'size' property", id)
+			return nil, fmt.Errorf("stream %d missing required 'size' property", id)
 		}
 
 		streams = append(streams, s)
