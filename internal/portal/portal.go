@@ -11,14 +11,30 @@ import (
 )
 
 const (
-	portalDestination      = "org.freedesktop.portal.Desktop"
-	portalPath             = "/org/freedesktop/portal/desktop"
-	remoteDesktopInterface = "org.freedesktop.portal.RemoteDesktop"
-	screenCastInterface    = "org.freedesktop.portal.ScreenCast"
-	requestInterface       = "org.freedesktop.portal.Request"
-	sessionInterface       = "org.freedesktop.portal.Session"
-	screenshotInterface    = "org.freedesktop.portal.Screenshot"
-	responseMember         = "Response"
+	portalDestination = "org.freedesktop.portal.Desktop"
+	portalPath        = "/org/freedesktop/portal/desktop"
+
+	remoteDesktopInterface            = "org.freedesktop.portal.RemoteDesktop"
+	methodCreateSession               = remoteDesktopInterface + ".CreateSession"
+	methodSelectDevices               = remoteDesktopInterface + ".SelectDevices"
+	methodStart                       = remoteDesktopInterface + ".Start"
+	methodNotifyPointerMotionAbsolute = remoteDesktopInterface + ".NotifyPointerMotionAbsolute"
+	methodNotifyPointerButton         = remoteDesktopInterface + ".NotifyPointerButton"
+	methodNotifyPointerAxis           = remoteDesktopInterface + ".NotifyPointerAxis"
+	methodNotifyKeyboardKeysym        = remoteDesktopInterface + ".NotifyKeyboardKeysym"
+
+	screenCastInterface = "org.freedesktop.portal.ScreenCast"
+	methodSelectSources = screenCastInterface + ".SelectSources"
+
+	requestInterface = "org.freedesktop.portal.Request"
+	responseMember   = "Response"
+	signalResponse   = requestInterface + "." + responseMember
+
+	sessionInterface   = "org.freedesktop.portal.Session"
+	methodSessionClose = sessionInterface + ".Close"
+
+	screenshotInterface = "org.freedesktop.portal.Screenshot"
+	methodScreenshot    = screenshotInterface + ".Screenshot"
 )
 
 var (
@@ -77,7 +93,7 @@ func (p *Portal) InitSession() error {
 func (p *Portal) Close() {
 	if p.session != "" {
 		p.connection.Object(portalDestination, p.session).
-			Call(sessionInterface+".Close", 0)
+			Call(methodSessionClose, 0)
 	}
 	p.connection.Close()
 }
@@ -91,7 +107,7 @@ func (p *Portal) Screenshot() ([]byte, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(screenshotInterface+".Screenshot", 0, "", options).Store(&requestPath); err != nil {
+	if err := object.Call(methodScreenshot, 0, "", options).Store(&requestPath); err != nil {
 		return nil, fmt.Errorf("screenshot call failed: %w", err)
 	}
 
@@ -128,32 +144,32 @@ func (p *Portal) MovePointer(x, y float64) error {
 	object := p.connection.Object(portalDestination, portalPath)
 
 	// Try session-relative motion (stream 0)
-	err := object.Call(remoteDesktopInterface+".NotifyPointerMotionAbsolute", 0, p.session, map[string]dbus.Variant{}, uint32(0), absoluteX, absoluteY).Err
+	err := object.Call(methodNotifyPointerMotionAbsolute, 0, p.session, map[string]dbus.Variant{}, uint32(0), absoluteX, absoluteY).Err
 	if err == nil {
 		return nil
 	}
 
 	// Fallback: target a specific stream
 	s, relativeX, relativeY := p.findStream(absoluteX, absoluteY)
-	return object.Call(remoteDesktopInterface+".NotifyPointerMotionAbsolute", 0, p.session, map[string]dbus.Variant{}, s.id, relativeX, relativeY).Err
+	return object.Call(methodNotifyPointerMotionAbsolute, 0, p.session, map[string]dbus.Variant{}, s.id, relativeX, relativeY).Err
 }
 
 // Click simulates a mouse button press or release.
 func (p *Portal) Click(button, state uint32) error {
 	object := p.connection.Object(portalDestination, portalPath)
-	return object.Call(remoteDesktopInterface+".NotifyPointerButton", 0, p.session, map[string]dbus.Variant{}, int32(button), state).Err
+	return object.Call(methodNotifyPointerButton, 0, p.session, map[string]dbus.Variant{}, int32(button), state).Err
 }
 
 // Scroll simulates a mouse wheel scroll.
 func (p *Portal) Scroll(deltaX, deltaY float64) error {
 	object := p.connection.Object(portalDestination, portalPath)
 	if deltaX != 0 {
-		if err := object.Call(remoteDesktopInterface+".NotifyPointerAxis", 0, p.session, map[string]dbus.Variant{}, deltaX, 0.0).Err; err != nil {
+		if err := object.Call(methodNotifyPointerAxis, 0, p.session, map[string]dbus.Variant{}, deltaX, 0.0).Err; err != nil {
 			return err
 		}
 	}
 	if deltaY != 0 {
-		if err := object.Call(remoteDesktopInterface+".NotifyPointerAxis", 0, p.session, map[string]dbus.Variant{}, 0.0, deltaY).Err; err != nil {
+		if err := object.Call(methodNotifyPointerAxis, 0, p.session, map[string]dbus.Variant{}, 0.0, deltaY).Err; err != nil {
 			return err
 		}
 	}
@@ -163,10 +179,8 @@ func (p *Portal) Scroll(deltaX, deltaY float64) error {
 // TypeKey simulates a keyboard key press or release using a keysym.
 func (p *Portal) TypeKey(keysym, state uint32) error {
 	object := p.connection.Object(portalDestination, portalPath)
-	return object.Call(remoteDesktopInterface+".NotifyKeyboardKeysym", 0, p.session, map[string]dbus.Variant{}, int32(keysym), state).Err
+	return object.Call(methodNotifyKeyboardKeysym, 0, p.session, map[string]dbus.Variant{}, int32(keysym), state).Err
 }
-
-// --- Portal Handshake Internals ---
 
 func (p *Portal) performHandshake() error {
 	signalChan, stopListening, err := p.setupResponseListener()
@@ -193,19 +207,32 @@ func (p *Portal) performHandshake() error {
 		return err
 	}
 
-	var startResponse map[string]dbus.Variant
+	var rawStreams [][]any
 	for _, response := range responses {
-		if _, ok := response["streams"]; ok {
-			startResponse = response
-			break
+		if v, ok := response["streams"]; ok {
+			if s, ok := v.Value().([][]any); ok {
+				rawStreams = s
+				break
+			}
 		}
 	}
 
-	if startResponse == nil {
+	p.streams = parseStreams(rawStreams)
+	if len(p.streams) == 0 {
 		return ErrNoStreamsInResponse
 	}
 
-	return p.parseStreams(startResponse)
+	// Calculate total dimensions from streams
+	for _, s := range p.streams {
+		if s.x+int32(s.w) > int32(p.width) {
+			p.width = uint32(s.x + int32(s.w))
+		}
+		if s.y+int32(s.h) > int32(p.height) {
+			p.height = uint32(s.y + int32(s.h))
+		}
+	}
+
+	return nil
 }
 
 func (p *Portal) createSession() (dbus.ObjectPath, error) {
@@ -217,7 +244,7 @@ func (p *Portal) createSession() (dbus.ObjectPath, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(remoteDesktopInterface+".CreateSession", 0, options).Store(&requestPath); err != nil {
+	if err := object.Call(methodCreateSession, 0, options).Store(&requestPath); err != nil {
 		return "", fmt.Errorf("CreateSession call failed: %w", err)
 	}
 
@@ -244,7 +271,7 @@ func (p *Portal) requestSources() (dbus.ObjectPath, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(screenCastInterface+".SelectSources", 0, p.session, options).Store(&requestPath); err != nil {
+	if err := object.Call(methodSelectSources, 0, p.session, options).Store(&requestPath); err != nil {
 		return "", fmt.Errorf("SelectSources call failed: %w", err)
 	}
 
@@ -259,7 +286,7 @@ func (p *Portal) requestDevices() (dbus.ObjectPath, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(remoteDesktopInterface+".SelectDevices", 0, p.session, options).Store(&requestPath); err != nil {
+	if err := object.Call(methodSelectDevices, 0, p.session, options).Store(&requestPath); err != nil {
 		return "", fmt.Errorf("SelectDevices call failed: %w", err)
 	}
 
@@ -273,24 +300,15 @@ func (p *Portal) requestStart() (dbus.ObjectPath, error) {
 
 	var requestPath dbus.ObjectPath
 	object := p.connection.Object(portalDestination, portalPath)
-	if err := object.Call(remoteDesktopInterface+".Start", 0, p.session, "", options).Store(&requestPath); err != nil {
+	if err := object.Call(methodStart, 0, p.session, "", options).Store(&requestPath); err != nil {
 		return "", fmt.Errorf("Start call failed: %w", err)
 	}
 
 	return requestPath, nil
 }
 
-func (p *Portal) parseStreams(response map[string]dbus.Variant) error {
-	streamsVar, ok := response["streams"]
-	if !ok {
-		return nil
-	}
-
-	rawStreams, ok := streamsVar.Value().([][]any)
-	if !ok {
-		return nil
-	}
-
+func parseStreams(rawStreams [][]any) []stream {
+	var streams []stream
 	for _, streamData := range rawStreams {
 		if len(streamData) < 2 {
 			continue
@@ -319,17 +337,9 @@ func (p *Portal) parseStreams(response map[string]dbus.Variant) error {
 			// dimensions from the actual screenshot or another reliable source.
 		}
 
-		p.streams = append(p.streams, s)
-
-		if s.x+int32(s.w) > int32(p.width) {
-			p.width = uint32(s.x + int32(s.w))
-		}
-		if s.y+int32(s.h) > int32(p.height) {
-			p.height = uint32(s.y + int32(s.h))
-		}
+		streams = append(streams, s)
 	}
-
-	return nil
+	return streams
 }
 
 func (p *Portal) waitForResponse(
@@ -359,7 +369,7 @@ func collectResponses(
 	}
 
 	for signal := range signalChan {
-		if signal.Name != requestInterface+"."+responseMember {
+		if signal.Name != signalResponse {
 			continue
 		}
 
