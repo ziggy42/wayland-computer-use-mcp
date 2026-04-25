@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,90 +11,213 @@ import (
 )
 
 const (
-	portalDest        = "org.freedesktop.portal.Desktop"
-	portalPath        = "/org/freedesktop/portal/desktop"
-	remoteDesktopIntf = "org.freedesktop.portal.RemoteDesktop"
-	screenCastIntf    = "org.freedesktop.portal.ScreenCast"
-	requestIntf       = "org.freedesktop.portal.Request"
-	sessionIntf       = "org.freedesktop.portal.Session"
+	portalDestination      = "org.freedesktop.portal.Desktop"
+	portalPath             = "/org/freedesktop/portal/desktop"
+	remoteDesktopInterface = "org.freedesktop.portal.RemoteDesktop"
+	screenCastInterface    = "org.freedesktop.portal.ScreenCast"
+	requestInterface       = "org.freedesktop.portal.Request"
+	sessionInterface       = "org.freedesktop.portal.Session"
+	screenshotInterface    = "org.freedesktop.portal.Screenshot"
+	responseMember         = "Response"
 )
 
-// stream represents an individual video stream (e.g., a specific monitor)
-// within the portal session.
-type stream struct {
-	// id is the unique identifier for the stream given by the portal.
-	id uint32
-	// x and y are the pixel coordinates of the stream's top-left corner
-	// relative to the desktop origin (0,0).
-	x, y int32
-	// w and h are the width and height of the stream in pixels.
-	w, h uint32
-}
+var (
+	ErrDimensionsUnknown   = errors.New("screen dimensions unknown; ensure portal session is active and screenshot has been taken")
+	ErrInvalidResponseBody = errors.New("invalid response body")
+	ErrInvalidResultsType  = errors.New("invalid results type")
+	ErrSignalChannelClosed = errors.New("signal channel closed")
+	ErrNoUriInResponse     = errors.New("no uri in response")
+	ErrNoStreamsInResponse = errors.New("no streams found in start response")
+	ErrInvalidResponse     = errors.New("invalid results type")
+)
 
 // Portal manages a connection to the XDG Desktop Portal service via DBus.
 // It handles the lifecycle of a Remote Desktop and ScreenCast session,
-// providing methods for taking screenshots and simulating user input
-// (mouse movement, clicks, scrolling, and keyboard events).
+// providing methods for taking screenshots and simulating user input.
 type Portal struct {
-	conn *dbus.Conn
-	// TODO: implement session restoration using restore_token
-	session dbus.ObjectPath
-	// width is the width of the total logical desktop area (all shared monitors) in pixels.
-	width uint32
-	// height is the height of the total logical desktop area (all shared monitors) in pixels.
-	height uint32
-	// streams is a list of screen/window streams shared in the current session.
-	streams []stream
+	connection *dbus.Conn
+	session    dbus.ObjectPath
+	width      uint32
+	height     uint32
+	streams    []stream
 }
 
+type stream struct {
+	id   uint32
+	x, y int32
+	w, h uint32
+}
+
+// NewPortal creates a new Portal instance.
 func NewPortal() (*Portal, error) {
-	conn, err := dbus.SessionBus()
+	connection, err := dbus.SessionBus()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to session bus: %w", err)
 	}
 
-	return &Portal{conn: conn}, nil
+	return &Portal{connection: connection}, nil
 }
 
+// InitSession initializes the portal session by performing the handshake.
 func (p *Portal) InitSession() error {
-	// 1. Create Session
 	sessionHandle, err := p.createSession()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create session: %w", err)
 	}
 	p.session = sessionHandle
 
-	// 2. Perform Handshake (Select Sources, Devices, and Start)
-	// We fire all three before waiting to avoid deadlocks where the OS
-	// waits for the 'Start' call before showing the permission UI.
-	if err = p.performHandshake(); err != nil {
-		return err
-	}
-
-	// 5. Detected Resolution summary
-	if p.width == 0 || p.height == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: failed to detect resolution from streams. Using default 1920x1080.\n")
-		p.width = 1920
-		p.height = 1080
-	} else {
-		fmt.Fprintf(os.Stderr, "Detected resolution from streams: %dx%d\n", p.width, p.height)
+	if err := p.performHandshake(); err != nil {
+		return fmt.Errorf("handshake failed: %w", err)
 	}
 
 	return nil
 }
 
-func (p *Portal) createSession() (dbus.ObjectPath, error) {
-	obj := p.conn.Object(portalDest, portalPath)
-	handleToken := "wayland_mcp_" + strings.ReplaceAll(uuid.New().String(), "-", "")
+// Close closes the portal session and the DBus connection.
+func (p *Portal) Close() {
+	if p.session != "" {
+		p.connection.Object(portalDestination, p.session).
+			Call(sessionInterface+".Close", 0)
+	}
+	p.connection.Close()
+}
 
+// Screenshot takes a screenshot and returns the raw bytes.
+func (p *Portal) Screenshot() ([]byte, error) {
 	options := map[string]dbus.Variant{
-		"session_handle_token": dbus.MakeVariant(handleToken),
-		"handle_token":         dbus.MakeVariant(handleToken + "_req"),
+		"handle_token": dbus.MakeVariant(newToken("wayland_mcp_shot_")),
+		"interactive":  dbus.MakeVariant(false),
 	}
 
 	var requestPath dbus.ObjectPath
-	err := obj.Call(remoteDesktopIntf+".CreateSession", 0, options).Store(&requestPath)
+	object := p.connection.Object(portalDestination, portalPath)
+	if err := object.Call(screenshotInterface+".Screenshot", 0, "", options).Store(&requestPath); err != nil {
+		return nil, fmt.Errorf("screenshot call failed: %w", err)
+	}
+
+	response, err := p.waitForResponse(requestPath)
 	if err != nil {
+		return nil, err
+	}
+
+	uri, ok := response["uri"].Value().(string)
+	if !ok {
+		return nil, ErrNoUriInResponse
+	}
+
+	path := strings.TrimPrefix(uri, "file://")
+	defer os.Remove(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read screenshot file: %w", err)
+	}
+
+	return data, nil
+}
+
+// MovePointer simulates mouse movement to absolute coordinates (0.0 to 1.0).
+func (p *Portal) MovePointer(x, y float64) error {
+	if p.width == 0 || p.height == 0 {
+		return ErrDimensionsUnknown
+	}
+
+	absoluteX := x * float64(p.width)
+	absoluteY := y * float64(p.height)
+
+	object := p.connection.Object(portalDestination, portalPath)
+
+	// Try session-relative motion (stream 0)
+	err := object.Call(remoteDesktopInterface+".NotifyPointerMotionAbsolute", 0, p.session, map[string]dbus.Variant{}, uint32(0), absoluteX, absoluteY).Err
+	if err == nil {
+		return nil
+	}
+
+	// Fallback: target a specific stream
+	s, relativeX, relativeY := p.findStream(absoluteX, absoluteY)
+	return object.Call(remoteDesktopInterface+".NotifyPointerMotionAbsolute", 0, p.session, map[string]dbus.Variant{}, s.id, relativeX, relativeY).Err
+}
+
+// Click simulates a mouse button press or release.
+func (p *Portal) Click(button, state uint32) error {
+	object := p.connection.Object(portalDestination, portalPath)
+	return object.Call(remoteDesktopInterface+".NotifyPointerButton", 0, p.session, map[string]dbus.Variant{}, int32(button), state).Err
+}
+
+// Scroll simulates a mouse wheel scroll.
+func (p *Portal) Scroll(deltaX, deltaY float64) error {
+	object := p.connection.Object(portalDestination, portalPath)
+	if deltaX != 0 {
+		if err := object.Call(remoteDesktopInterface+".NotifyPointerAxis", 0, p.session, map[string]dbus.Variant{}, deltaX, 0.0).Err; err != nil {
+			return err
+		}
+	}
+	if deltaY != 0 {
+		if err := object.Call(remoteDesktopInterface+".NotifyPointerAxis", 0, p.session, map[string]dbus.Variant{}, 0.0, deltaY).Err; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TypeKey simulates a keyboard key press or release using a keysym.
+func (p *Portal) TypeKey(keysym, state uint32) error {
+	object := p.connection.Object(portalDestination, portalPath)
+	return object.Call(remoteDesktopInterface+".NotifyKeyboardKeysym", 0, p.session, map[string]dbus.Variant{}, int32(keysym), state).Err
+}
+
+// --- Portal Handshake Internals ---
+
+func (p *Portal) performHandshake() error {
+	signalChan, stopListening, err := p.setupResponseListener()
+	if err != nil {
+		return err
+	}
+	defer stopListening()
+
+	sourcesPath, err := p.requestSources()
+	if err != nil {
+		return err
+	}
+	devicesPath, err := p.requestDevices()
+	if err != nil {
+		return err
+	}
+	startPath, err := p.requestStart()
+	if err != nil {
+		return err
+	}
+
+	responses, err := collectResponses(signalChan, sourcesPath, devicesPath, startPath)
+	if err != nil {
+		return err
+	}
+
+	var startResponse map[string]dbus.Variant
+	for _, response := range responses {
+		if _, ok := response["streams"]; ok {
+			startResponse = response
+			break
+		}
+	}
+
+	if startResponse == nil {
+		return ErrNoStreamsInResponse
+	}
+
+	return p.parseStreams(startResponse)
+}
+
+func (p *Portal) createSession() (dbus.ObjectPath, error) {
+	token := newToken("wayland_mcp_")
+	options := map[string]dbus.Variant{
+		"session_handle_token": dbus.MakeVariant(token),
+		"handle_token":         dbus.MakeVariant(token + "_req"),
+	}
+
+	var requestPath dbus.ObjectPath
+	object := p.connection.Object(portalDestination, portalPath)
+	if err := object.Call(remoteDesktopInterface+".CreateSession", 0, options).Store(&requestPath); err != nil {
 		return "", fmt.Errorf("CreateSession call failed: %w", err)
 	}
 
@@ -104,26 +228,23 @@ func (p *Portal) createSession() (dbus.ObjectPath, error) {
 
 	sessionHandle, ok := response["session_handle"].Value().(string)
 	if !ok {
-		return "", fmt.Errorf("no session_handle in response")
+		return "", errors.New("no session_handle in response")
 	}
 
 	return dbus.ObjectPath(sessionHandle), nil
 }
 
 func (p *Portal) requestSources() (dbus.ObjectPath, error) {
-	obj := p.conn.Object(portalDest, portalPath)
-	handleToken := "wayland_mcp_src_" + strings.ReplaceAll(uuid.New().String(), "-", "")
-
 	options := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(handleToken),
+		"handle_token": dbus.MakeVariant(newToken("wayland_mcp_src_")),
 		"types":        dbus.MakeVariant(uint32(1)), // 1: Screen, 2: Window
 		"multiple":     dbus.MakeVariant(true),
 		"cursor_mode":  dbus.MakeVariant(uint32(2)), // Embedded cursor
 	}
 
 	var requestPath dbus.ObjectPath
-	err := obj.Call(screenCastIntf+".SelectSources", 0, p.session, options).Store(&requestPath)
-	if err != nil {
+	object := p.connection.Object(portalDestination, portalPath)
+	if err := object.Call(screenCastInterface+".SelectSources", 0, p.session, options).Store(&requestPath); err != nil {
 		return "", fmt.Errorf("SelectSources call failed: %w", err)
 	}
 
@@ -131,90 +252,28 @@ func (p *Portal) requestSources() (dbus.ObjectPath, error) {
 }
 
 func (p *Portal) requestDevices() (dbus.ObjectPath, error) {
-	obj := p.conn.Object(portalDest, portalPath)
-	handleToken := "wayland_mcp_sel_" + strings.ReplaceAll(uuid.New().String(), "-", "")
-
 	options := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(handleToken),
+		"handle_token": dbus.MakeVariant(newToken("wayland_mcp_sel_")),
 		"types":        dbus.MakeVariant(uint32(3)), // 1: Keyboard, 2: Pointer, 3: Both
 	}
 
 	var requestPath dbus.ObjectPath
-	err := obj.Call(remoteDesktopIntf+".SelectDevices", 0, p.session, options).Store(&requestPath)
-	if err != nil {
+	object := p.connection.Object(portalDestination, portalPath)
+	if err := object.Call(remoteDesktopInterface+".SelectDevices", 0, p.session, options).Store(&requestPath); err != nil {
 		return "", fmt.Errorf("SelectDevices call failed: %w", err)
 	}
 
 	return requestPath, nil
 }
 
-// performHandshake fires SelectSources, SelectDevices, and Start in sequence
-// without waiting for intermediate responses. This is the standard way to
-// trigger a single unified system dialog for all permissions.
-func (p *Portal) performHandshake() error {
-	// 1. Start listening BEFORE we send any requests
-	fmt.Fprintf(os.Stderr, "Handshake: Setting up signal listener...\n")
-	signalChan, stopListening, err := p.setupResponseListener()
-	if err != nil {
-		return err
-	}
-	defer stopListening()
-
-	fmt.Fprintf(os.Stderr, "Handshake: Requesting sources...\n")
-	srcPath, err := p.requestSources()
-	if err != nil {
-		return err
-	}
-
-	fmt.Fprintf(os.Stderr, "Handshake: Requesting devices...\n")
-	devPath, err := p.requestDevices()
-	if err != nil {
-		return err
-	}
-
-	fmt.Fprintf(os.Stderr, "Handshake: Requesting start...\n")
-	startPath, err := p.requestStart()
-	if err != nil {
-		return err
-	}
-
-	fmt.Fprintf(os.Stderr, "Handshake: Waiting for responses (src=%s, dev=%s, start=%s)...\n", srcPath, devPath, startPath)
-	resps, err := p.collectResponses(signalChan, srcPath, devPath, startPath)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "Handshake: All %d responses received!\n", len(resps))
-
-	// The last response (from Start) contains the stream information.
-	// We need to find the response that belongs to startPath.
-	// Note: collectResponses returns results in the order they arrive.
-	// We just look for the "streams" key which is unique to the Start response.
-	var startResponse map[string]dbus.Variant
-	for _, r := range resps {
-		if _, ok := r["streams"]; ok {
-			startResponse = r
-			break
-		}
-	}
-
-	if startResponse == nil {
-		return fmt.Errorf("no streams found in start response")
-	}
-
-	return p.parseStreams(startResponse)
-}
-
 func (p *Portal) requestStart() (dbus.ObjectPath, error) {
-	obj := p.conn.Object(portalDest, portalPath)
-	handleToken := "wayland_mcp_start_" + strings.ReplaceAll(uuid.New().String(), "-", "")
-
 	options := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(handleToken),
+		"handle_token": dbus.MakeVariant(newToken("wayland_mcp_start_")),
 	}
 
 	var requestPath dbus.ObjectPath
-	err := obj.Call(remoteDesktopIntf+".Start", 0, p.session, "", options).Store(&requestPath)
-	if err != nil {
+	object := p.connection.Object(portalDestination, portalPath)
+	if err := object.Call(remoteDesktopInterface+".Start", 0, p.session, "", options).Store(&requestPath); err != nil {
 		return "", fmt.Errorf("Start call failed: %w", err)
 	}
 
@@ -227,259 +286,160 @@ func (p *Portal) parseStreams(response map[string]dbus.Variant) error {
 		return nil
 	}
 
-	v := streamsVar.Value()
-	s, ok := v.([][]interface{})
+	rawStreams, ok := streamsVar.Value().([][]any)
 	if !ok {
 		return nil
 	}
 
-	for _, streamInterface := range s {
-		if len(streamInterface) < 2 {
+	for _, streamData := range rawStreams {
+		if len(streamData) < 2 {
 			continue
 		}
-		streamID, ok1 := streamInterface[0].(uint32)
-		lastIdx := len(streamInterface) - 1
-		options, ok2 := streamInterface[lastIdx].(map[string]dbus.Variant)
 
-		if ok1 && ok2 {
-			s := stream{id: streamID}
-			if pos, ok := options["position"]; ok {
-				pv := pos.Value()
-				if p, ok := pv.([]int32); ok && len(p) >= 2 {
-					s.x, s.y = p[0], p[1]
-				} else if p, ok := pv.([]int64); ok && len(p) >= 2 {
-					s.x, s.y = int32(p[0]), int32(p[1])
-				} else if p, ok := pv.([]interface{}); ok && len(p) >= 2 {
-					if x, ok := p[0].(int32); ok {
-						s.x = x
-					}
-					if y, ok := p[1].(int32); ok {
-						s.y = y
-					}
-				}
-			}
-			if size, ok := options["size"]; ok {
-				sv := size.Value()
-				if sizeArr, ok := sv.([]int32); ok && len(sizeArr) >= 2 {
-					s.w, s.h = uint32(sizeArr[0]), uint32(sizeArr[1])
-				} else if sizeArr, ok := sv.([]int64); ok && len(sizeArr) >= 2 {
-					s.w, s.h = uint32(sizeArr[0]), uint32(sizeArr[1])
-				} else if sizeArr, ok := sv.([]interface{}); ok && len(sizeArr) >= 2 {
-					if w, ok := sizeArr[0].(int32); ok {
-						s.w = uint32(w)
-					}
-					if h, ok := sizeArr[1].(int32); ok {
-						s.h = uint32(h)
-					}
-				}
-			}
-			p.streams = append(p.streams, s)
+		id, ok1 := streamData[0].(uint32)
+		options, ok2 := streamData[len(streamData)-1].(map[string]dbus.Variant)
+		if !ok1 || !ok2 {
+			continue
+		}
 
-			// Update total desktop dimensions
-			if s.x+int32(s.w) > int32(p.width) {
-				p.width = uint32(s.x + int32(s.w))
-			}
-			if s.y+int32(s.h) > int32(p.height) {
-				p.height = uint32(s.y + int32(s.h))
+		s := stream{id: id}
+		if position, ok := options["position"]; ok {
+			var coords []int32
+			if err := position.Store(&coords); err == nil && len(coords) >= 2 {
+				s.x, s.y = coords[0], coords[1]
 			}
 		}
+		if size, ok := options["size"]; ok {
+			var dims []int32
+			if err := size.Store(&dims); err == nil && len(dims) >= 2 {
+				s.w, s.h = uint32(dims[0]), uint32(dims[1])
+			}
+		} else {
+			// TODO: The 'size' property is optional. If missing, we should detect
+			// dimensions from the actual screenshot or another reliable source.
+		}
+
+		p.streams = append(p.streams, s)
+
+		if s.x+int32(s.w) > int32(p.width) {
+			p.width = uint32(s.x + int32(s.w))
+		}
+		if s.y+int32(s.h) > int32(p.height) {
+			p.height = uint32(s.y + int32(s.h))
+		}
 	}
-	fmt.Fprintf(os.Stderr, "Remote Desktop session started with %d streams\n", len(p.streams))
 
 	return nil
 }
 
+func (p *Portal) waitForResponse(
+	requestPath dbus.ObjectPath,
+) (map[string]dbus.Variant, error) {
+	signalChan, stopListening, err := p.setupResponseListener()
+	if err != nil {
+		return nil, err
+	}
+	defer stopListening()
+
+	responses, err := collectResponses(signalChan, requestPath)
+	if err != nil {
+		return nil, err
+	}
+	return responses[0], nil
+}
+
+func collectResponses(
+	signalChan chan *dbus.Signal,
+	paths ...dbus.ObjectPath,
+) ([]map[string]dbus.Variant, error) {
+	results := make([]map[string]dbus.Variant, 0, len(paths))
+	pending := make(map[dbus.ObjectPath]bool)
+	for _, path := range paths {
+		pending[path] = true
+	}
+
+	for signal := range signalChan {
+		if signal.Name != requestInterface+"."+responseMember {
+			continue
+		}
+
+		if !pending[signal.Path] {
+			continue
+		}
+
+		if len(signal.Body) < 2 {
+			return nil, ErrInvalidResponseBody
+		}
+
+		code, ok := signal.Body[0].(uint32)
+		if !ok || code != 0 {
+			return nil, fmt.Errorf("portal request failed (path=%s, code=%d)", signal.Path, code)
+		}
+
+		result, ok := signal.Body[1].(map[string]dbus.Variant)
+		if !ok {
+			return nil, ErrInvalidResultsType
+		}
+
+		results = append(results, result)
+		delete(pending, signal.Path)
+
+		if len(pending) == 0 {
+			return results, nil
+		}
+	}
+
+	return nil, ErrSignalChannelClosed
+}
+
 func (p *Portal) setupResponseListener() (chan *dbus.Signal, func(), error) {
-	err := p.conn.AddMatchSignal(
-		dbus.WithMatchInterface(requestIntf),
-		dbus.WithMatchMember("Response"),
+	err := p.connection.AddMatchSignal(
+		dbus.WithMatchInterface(requestInterface),
+		dbus.WithMatchMember(responseMember),
 	)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	ch := make(chan *dbus.Signal, 100)
-	p.conn.Signal(ch)
+	signalChan := make(chan *dbus.Signal, 100)
+	p.connection.Signal(signalChan)
 
 	stop := func() {
-		p.conn.RemoveSignal(ch)
-		p.conn.RemoveMatchSignal(
-			dbus.WithMatchInterface(requestIntf),
-			dbus.WithMatchMember("Response"),
+		p.connection.RemoveSignal(signalChan)
+		p.connection.RemoveMatchSignal(
+			dbus.WithMatchInterface(requestInterface),
+			dbus.WithMatchMember(responseMember),
 		)
 	}
 
-	return ch, stop, nil
+	return signalChan, stop, nil
 }
 
-func (p *Portal) collectResponses(ch chan *dbus.Signal, paths ...dbus.ObjectPath) ([]map[string]dbus.Variant, error) {
-	results := make([]map[string]dbus.Variant, 0, len(paths))
-	pendingPaths := make(map[dbus.ObjectPath]bool)
-	for _, path := range paths {
-		pendingPaths[path] = true
+func (p *Portal) findStream(
+	absoluteX,
+	absoluteY float64,
+) (s stream, relativeX, relativeY float64) {
+	if len(p.streams) == 0 {
+		return stream{}, absoluteX, absoluteY
 	}
-
-	for sig := range ch {
-		fmt.Fprintf(os.Stderr, "Signal received: Path=%s, Name=%s\n", sig.Path, sig.Name)
-		if sig.Name != requestIntf+".Response" {
-			continue
-		}
-
-		if pendingPaths[sig.Path] {
-			fmt.Fprintf(os.Stderr, "Matched pending path: %s\n", sig.Path)
-			if len(sig.Body) < 2 {
-				return nil, fmt.Errorf("invalid response body")
-			}
-			responseCode, ok := sig.Body[0].(uint32)
-			if !ok {
-				return nil, fmt.Errorf("invalid response code type")
-			}
-			if responseCode != 0 {
-				return nil, fmt.Errorf("portal request failed with code %d", responseCode)
-			}
-			resultsMap, ok := sig.Body[1].(map[string]dbus.Variant)
-			if !ok {
-				return nil, fmt.Errorf("invalid results type")
-			}
-
-			results = append(results, resultsMap)
-			delete(pendingPaths, sig.Path)
-
-			if len(pendingPaths) == 0 {
-				return results, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("signal channel closed")
-}
-
-func (p *Portal) waitForResponse(requestPath dbus.ObjectPath) (map[string]dbus.Variant, error) {
-	ch, stop, err := p.setupResponseListener()
-	if err != nil {
-		return nil, err
-	}
-	defer stop()
-
-	resps, err := p.collectResponses(ch, requestPath)
-	if err != nil {
-		return nil, err
-	}
-	return resps[0], nil
-}
-
-func (p *Portal) Click(button uint32, state uint32) error {
-	obj := p.conn.Object(portalDest, portalPath)
-	return obj.Call(remoteDesktopIntf+".NotifyPointerButton", 0, p.session, map[string]dbus.Variant{}, int32(button), state).Err
-}
-
-func (p *Portal) MovePointer(x, y float64) error {
-	obj := p.conn.Object(portalDest, portalPath)
-	absX := x * float64(p.width)
-	absY := y * float64(p.height)
-
-	// Try using stream 0 (session-relative) first
-	err := obj.Call(remoteDesktopIntf+".NotifyPointerMotionAbsolute", 0, p.session, map[string]dbus.Variant{}, uint32(0), absX, absY).Err
-	if err == nil {
-		return nil
-	}
-
-	// Fallback to targeted stream
-	var targetStreamID uint32 = 0
-	var relX, relY float64 = absX, absY
 
 	for _, s := range p.streams {
-		if int32(absX) >= s.x && int32(absX) < s.x+int32(s.w) &&
-			int32(absY) >= s.y && int32(absY) < s.y+int32(s.h) {
-			targetStreamID = s.id
-			relX = absX - float64(s.x)
-			relY = absY - float64(s.y)
-			break
+		if int32(absoluteX) >= s.x && int32(absoluteX) < s.x+int32(s.w) &&
+			int32(absoluteY) >= s.y && int32(absoluteY) < s.y+int32(s.h) {
+			return s, absoluteX - float64(s.x), absoluteY - float64(s.y)
 		}
 	}
 
-	// If no stream found, but we have streams, pick the first one and clamp
-	if targetStreamID == 0 && len(p.streams) > 0 {
-		targetStreamID = p.streams[0].id
-		relX = absX - float64(p.streams[0].x)
-		relY = absY - float64(p.streams[0].y)
-
-		// Clamp relX and relY to stream bounds
-		if relX < 0 {
-			relX = 0
-		} else if relX >= float64(p.streams[0].w) {
-			relX = float64(p.streams[0].w) - 1
-		}
-		if relY < 0 {
-			relY = 0
-		} else if relY >= float64(p.streams[0].h) {
-			relY = float64(p.streams[0].h) - 1
-		}
-	}
-
-	return obj.Call(remoteDesktopIntf+".NotifyPointerMotionAbsolute", 0, p.session, map[string]dbus.Variant{}, targetStreamID, relX, relY).Err
+	s = p.streams[0]
+	relativeX = clamp(absoluteX-float64(s.x), 0, float64(s.w)-1)
+	relativeY = clamp(absoluteY-float64(s.y), 0, float64(s.h)-1)
+	return
 }
 
-func (p *Portal) Scroll(dx, dy float64) error {
-	obj := p.conn.Object(portalDest, portalPath)
-	if dx != 0 {
-		err := obj.Call(remoteDesktopIntf+".NotifyPointerAxis", 0, p.session, map[string]dbus.Variant{}, dx, 0.0).Err
-		if err != nil {
-			return err
-		}
-	}
-	if dy != 0 {
-		err := obj.Call(remoteDesktopIntf+".NotifyPointerAxis", 0, p.session, map[string]dbus.Variant{}, 0.0, dy).Err
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+func newToken(prefix string) string {
+	return prefix + strings.ReplaceAll(uuid.New().String(), "-", "")
 }
 
-func (p *Portal) TypeKey(keysym uint32, state uint32) error {
-	obj := p.conn.Object(portalDest, portalPath)
-	return obj.Call(remoteDesktopIntf+".NotifyKeyboardKeysym", 0, p.session, map[string]dbus.Variant{}, int32(keysym), state).Err
-}
-
-func (p *Portal) Screenshot() ([]byte, error) {
-	obj := p.conn.Object(portalDest, portalPath)
-	handleToken := "wayland_mcp_shot_" + strings.ReplaceAll(uuid.New().String(), "-", "")
-
-	options := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(handleToken),
-		"interactive":  dbus.MakeVariant(false),
-	}
-
-	var requestPath dbus.ObjectPath
-	err := obj.Call("org.freedesktop.portal.Screenshot.Screenshot", 0, "", options).Store(&requestPath)
-	if err != nil {
-		return nil, fmt.Errorf("Screenshot call failed: %w", err)
-	}
-
-	response, err := p.waitForResponse(requestPath)
-	if err != nil {
-		return nil, err
-	}
-
-	uri, ok := response["uri"].Value().(string)
-	if !ok {
-		return nil, fmt.Errorf("no uri in response")
-	}
-
-	path := strings.TrimPrefix(uri, "file://")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read screenshot file: %w", err)
-	}
-
-	os.Remove(path)
-	return data, nil
-}
-
-func (p *Portal) Close() {
-	if p.session != "" {
-		p.conn.Object(portalDest, p.session).Call(sessionIntf+".Close", 0)
-	}
-	p.conn.Close()
+func clamp[T ~float64 | ~int32](v, min_v, max_v T) T {
+	return min(max_v, max(min_v, v))
 }
