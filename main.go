@@ -24,9 +24,13 @@ func main() {
 	}
 	defer p.Close()
 
-	if err := p.InitSession(); err != nil {
-		log.Fatalf("Failed to initialize portal session: %v", err)
-	}
+	// Initialize portal in the background to avoid blocking the MCP server startup.
+	// This prevents the agent from timing out while waiting for the user to click the portal UI.
+	go func() {
+		if err := p.InitSession(); err != nil {
+			fmt.Fprintf(os.Stderr, "Portal initialization failed: %v\n", err)
+		}
+	}()
 
 	s := server.NewMCPServer(
 		"wayland-computer-use",
