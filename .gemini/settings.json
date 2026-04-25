@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "wayland": {
-      "command": "./wayland-computer-use-mcp",
-      "args": []
+      "command": "go",
+      "args": [
+        "run",
+        "."
+      ]
     }
   }
 }

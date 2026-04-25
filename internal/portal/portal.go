@@ -1,8 +1,13 @@
 package portal
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
 	"os"
 	"strings"
 
@@ -62,8 +67,10 @@ var (
 type Portal struct {
 	connection *dbus.Conn
 	session    dbus.ObjectPath
-	width      int32
-	height     int32
+	minX       int32 // Left edge of the shared area bounding box
+	minY       int32 // Top edge of the shared area bounding box
+	width      int32 // Width of the shared area bounding box
+	height     int32 // Height of the shared area bounding box
 	streams    []stream
 }
 
@@ -145,6 +152,37 @@ func (p *Portal) Screenshot() ([]byte, error) {
 		return nil, fmt.Errorf("failed to read screenshot file: %w", err)
 	}
 
+	// Crop the screenshot to match the shared streams bounding box.
+	// This ensures that if the user shared only one monitor in a multi-monitor
+	// setup, the agent doesn't see the other monitors in the screenshot.
+	if p.width > 0 && p.height > 0 {
+		img, _, err := image.Decode(bytes.NewReader(data))
+		if err == nil {
+			bounds := img.Bounds()
+			// If the screenshot is larger than our shared area, we crop it.
+			if bounds.Dx() > int(p.width) || bounds.Dy() > int(p.height) {
+				if si, ok := img.(interface {
+					SubImage(r image.Rectangle) image.Image
+				}); ok {
+					rect := image.Rect(
+						int(p.minX), int(p.minY),
+						int(p.minX+p.width), int(p.minY+p.height),
+					)
+					// Intersect with actual image bounds to be safe
+					rect = rect.Intersect(bounds)
+					cropped := si.SubImage(rect)
+
+					var buf bytes.Buffer
+					if err := png.Encode(&buf, cropped); err == nil {
+						return buf.Bytes(), nil
+					}
+				}
+			}
+		}
+		// If decoding/cropping fails, we fall back to the original image
+		// but coordinates might be misaligned.
+	}
+
 	return data, nil
 }
 
@@ -154,8 +192,8 @@ func (p *Portal) MovePointer(x, y float64) error {
 		return ErrDimensionsUnknown
 	}
 
-	absoluteX := x * float64(p.width)
-	absoluteY := y * float64(p.height)
+	absoluteX := x*float64(p.width) + float64(p.minX)
+	absoluteY := y*float64(p.height) + float64(p.minY)
 
 	// Try session-relative motion (stream 0)
 	err := p.call(
@@ -237,20 +275,37 @@ func (p *Portal) startSession() error {
 	}
 	p.streams = streams
 
-	p.width, p.height = totalBounds(p.streams)
+	p.minX, p.minY, p.width, p.height = calculateBounds(p.streams)
 	return nil
 }
 
-func totalBounds(streams []stream) (width, height int32) {
-	for _, s := range streams {
-		if right := s.x + int32(s.w); right > width {
-			width = right
+// calculateBounds finds the bounding box that encompasses all shared streams.
+// This is necessary for mapping normalized agent coordinates (0-1) to the
+// specific portion of the desktop that the user has shared.
+func calculateBounds(streams []stream) (minX, minY, width, height int32) {
+	if len(streams) == 0 {
+		return 0, 0, 0, 0
+	}
+
+	minX, minY = streams[0].x, streams[0].y
+	maxX, maxY := minX+int32(streams[0].w), minY+int32(streams[0].h)
+
+	for _, s := range streams[1:] {
+		if s.x < minX {
+			minX = s.x
 		}
-		if bottom := s.y + int32(s.h); bottom > height {
-			height = bottom
+		if s.y < minY {
+			minY = s.y
+		}
+		if right := s.x + int32(s.w); right > maxX {
+			maxX = right
+		}
+		if bottom := s.y + int32(s.h); bottom > maxY {
+			maxY = bottom
 		}
 	}
-	return
+
+	return minX, minY, maxX - minX, maxY - minY
 }
 
 func (p *Portal) createSession() (dbus.ObjectPath, error) {

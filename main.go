@@ -195,6 +195,12 @@ func typeTextHandler(p *portal.Portal) server.ToolHandlerFunc {
 
 		for _, r := range text {
 			keysym := uint32(r)
+			switch r {
+			case '\n':
+				keysym = 0xFF0D // XK_Return
+			case '\t':
+				keysym = 0xFF09 // XK_Tab
+			}
 			if err := p.TypeKey(keysym, 1); err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to type key: %v", err)), nil
 			}
