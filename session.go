@@ -168,12 +168,10 @@ func parseStreams(rawStreams [][]any) ([]stream, error) {
 }
 
 func variantToInt32Slice(v dbus.Variant) ([]int32, bool) {
-	var out []int32
-	if v.Store(&out) == nil {
+	if out, ok := storeVariant[[]int32](v); ok {
 		return out, true
 	}
-	var s struct{ X, Y int32 }
-	if v.Store(&s) == nil {
+	if s, ok := storeVariant[struct{ X, Y int32 }](v); ok {
 		return []int32{s.X, s.Y}, true
 	}
 	return nil, false

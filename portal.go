@@ -94,7 +94,7 @@ func (p *portal) createSession() (dbus.ObjectPath, error) {
 	if err != nil {
 		return "", err
 	}
-	sessionHandle, ok := response["session_handle"].Value().(string)
+	sessionHandle, ok := storeVariant[string](response["session_handle"])
 	if !ok {
 		return "", errNoSessionHandle
 	}
@@ -131,7 +131,7 @@ func (p *portal) startSession(
 	var rawStreams [][]any
 	for _, response := range responses {
 		if v, ok := response["streams"]; ok {
-			if s, ok := v.Value().([][]any); ok {
+			if s, ok := storeVariant[[][]any](v); ok {
 				rawStreams = s
 				break
 			}

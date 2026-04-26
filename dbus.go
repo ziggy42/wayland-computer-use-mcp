@@ -180,3 +180,10 @@ func setupResponseListener(
 func newToken(prefix string) string {
 	return prefix + strings.ReplaceAll(uuid.New().String(), "-", "")
 }
+
+// storeVariant attempts to store a dbus.Variant into a generic type T.
+func storeVariant[T any](v dbus.Variant) (T, bool) {
+	var out T
+	err := v.Store(&out)
+	return out, err == nil
+}

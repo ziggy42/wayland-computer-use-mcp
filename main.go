@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os/exec"
 
@@ -13,13 +14,19 @@ const (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("Fatal error: %v", err)
+	}
+}
+
+func run() error {
 	if _, err := exec.LookPath("gst-launch-1.0"); err != nil {
-		log.Fatal("gst-launch-1.0 not found")
+		return fmt.Errorf("gst-launch-1.0 not found")
 	}
 
 	p, err := newPortal()
 	if err != nil {
-		log.Fatalf("Failed to connect to portal: %v", err)
+		return fmt.Errorf("failed to connect to portal: %v", err)
 	}
 	defer p.close()
 
@@ -34,7 +41,5 @@ func main() {
 		s.AddTool(tool.info, tool.handler)
 	}
 
-	if err := server.ServeStdio(s); err != nil {
-		log.Fatalf("Server error: %v", err)
-	}
+	return server.ServeStdio(s)
 }

@@ -257,6 +257,12 @@ func typeTextHandler(p *portal) server.ToolHandlerFunc {
 
 		for _, r := range text {
 			keysym := uint32(r)
+			// For Unicode characters above U+00FF (e.g., emojis, Cyrillic), the XKB
+			// specification requires the keysym to be constructed as
+			// 0x01000000 | unicode.
+			if r > 0x00FF {
+				keysym = 0x01000000 | uint32(r)
+			}
 			switch r {
 			case '\n':
 				keysym = 0xFF0D // XK_Return

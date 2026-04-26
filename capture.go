@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/draw"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 // captureScreenshot grabs one frame from each PipeWire stream via GStreamer
@@ -70,7 +72,11 @@ func captureStream(pwRemote *os.File, st stream) (image.Image, error) {
 	tmpFile.Close()
 	defer os.Remove(tmpPath)
 
-	cmd := exec.Command(
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(
+		ctx,
 		"gst-launch-1.0",
 		"pipewiresrc",
 		fmt.Sprintf("fd=%d", 3),
