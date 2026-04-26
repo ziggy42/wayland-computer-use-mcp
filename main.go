@@ -6,8 +6,6 @@ import (
 	"os"
 
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/yourusername/wayland-computer-use-mcp/internal/portal"
-	"github.com/yourusername/wayland-computer-use-mcp/internal/tools"
 )
 
 const (
@@ -16,7 +14,7 @@ const (
 )
 
 func main() {
-	p, err := portal.NewPortal()
+	p, err := NewPortal()
 	if err != nil {
 		log.Fatalf("Failed to connect to portal: %v", err)
 	}
@@ -33,7 +31,7 @@ func main() {
 
 	s := server.NewMCPServer(serverName, serverVersion, server.WithLogging())
 
-	for _, tool := range tools.GetTools(p) {
+	for _, tool := range GetTools(p) {
 		s.AddTool(tool.Info, tool.Handler)
 	}
 

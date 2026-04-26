@@ -1,4 +1,4 @@
-module github.com/yourusername/wayland-computer-use-mcp
+module github.com/ziggy42/wayland-computer-use-mcp
 
 go 1.25.5
 

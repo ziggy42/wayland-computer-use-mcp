@@ -1,4 +1,4 @@
-package tools
+package main
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/yourusername/wayland-computer-use-mcp/internal/portal"
 )
 
 // Tool represents an MCP tool and its handler.
@@ -21,7 +20,7 @@ type Tool struct {
 }
 
 // GetTools returns all wayland-computer-use tools.
-func GetTools(p *portal.Portal) []Tool {
+func GetTools(p *Portal) []Tool {
 	return []Tool{
 		{
 			Info: mcp.NewTool("screenshot",
@@ -112,7 +111,7 @@ func waitHandler() server.ToolHandlerFunc {
 	}
 }
 
-func screenshotHandler(p *portal.Portal) server.ToolHandlerFunc {
+func screenshotHandler(p *Portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
@@ -131,7 +130,7 @@ func screenshotHandler(p *portal.Portal) server.ToolHandlerFunc {
 	}
 }
 
-func clickHandler(p *portal.Portal) server.ToolHandlerFunc {
+func clickHandler(p *Portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
@@ -167,7 +166,7 @@ func clickHandler(p *portal.Portal) server.ToolHandlerFunc {
 	}
 }
 
-func scrollHandler(p *portal.Portal) server.ToolHandlerFunc {
+func scrollHandler(p *Portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
@@ -220,7 +219,7 @@ func systemInfoHandler() server.ToolHandlerFunc {
 	}
 }
 
-func typeTextHandler(p *portal.Portal) server.ToolHandlerFunc {
+func typeTextHandler(p *Portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
@@ -254,7 +253,7 @@ func typeTextHandler(p *portal.Portal) server.ToolHandlerFunc {
 	}
 }
 
-func pressKeyHandler(p *portal.Portal) server.ToolHandlerFunc {
+func pressKeyHandler(p *Portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
