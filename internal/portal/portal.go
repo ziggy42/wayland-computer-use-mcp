@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	// D-Bus addresses and interfaces
+	// D-Bus destination and path
 	portalDestination = "org.freedesktop.portal.Desktop"
 	portalPath        = "/org/freedesktop/portal/desktop"
 
+	// Interface names
 	remoteDesktopInterface = "org.freedesktop.portal.RemoteDesktop"
 	screenCastInterface    = "org.freedesktop.portal.ScreenCast"
 	screenshotInterface    = "org.freedesktop.portal.Screenshot"
@@ -34,18 +35,20 @@ const (
 	methodNotifyPointerButton         = remoteDesktopInterface + ".NotifyPointerButton"
 	methodNotifyPointerAxis           = remoteDesktopInterface + ".NotifyPointerAxis"
 	methodNotifyKeyboardKeysym        = remoteDesktopInterface + ".NotifyKeyboardKeysym"
+	methodSelectSources               = screenCastInterface + ".SelectSources"
+	methodScreenshot                  = screenshotInterface + ".Screenshot"
+	methodSessionClose                = sessionInterface + ".Close"
 
-	methodSelectSources = screenCastInterface + ".SelectSources"
-	methodScreenshot    = screenshotInterface + ".Screenshot"
-	methodSessionClose  = sessionInterface + ".Close"
-
-	// Signals
+	// Signal names
 	responseMember = "Response"
 	signalResponse = requestInterface + "." + responseMember
+
+	// noParentWindow is passed to portal methods that take an optional parent
+	// window handle; an empty string means "no parent".
+	noParentWindow = ""
 )
 
 const (
-	// Enum values
 	sourceTypeScreen   uint32 = 1
 	cursorModeEmbedded uint32 = 2
 	deviceTypeKeyboard uint32 = 1
@@ -59,53 +62,53 @@ var (
 	ErrSignalChannelClosed = errors.New("signal channel closed")
 	ErrNoURIInResponse     = errors.New("no uri in response")
 	ErrNoStreamsInResponse = errors.New("no streams found in start response")
+	ErrSubImageCrop        = errors.New("image does not support sub-image cropping")
+	ErrCropOutsideBounds   = errors.New("crop rectangle is outside image bounds")
+	ErrNoSessionHandle     = errors.New("no session_handle in response")
 )
 
-// Portal manages a connection to the XDG Desktop Portal service via DBus.
+// Portal manages a connection to the XDG Desktop Portal service via D-Bus.
 // It handles the lifecycle of a Remote Desktop and ScreenCast session,
 // providing methods for taking screenshots and simulating user input.
 type Portal struct {
 	connection *dbus.Conn
 	session    dbus.ObjectPath
-	minX       int32 // Left edge of the shared area bounding box
-	minY       int32 // Top edge of the shared area bounding box
-	width      int32 // Width of the shared area bounding box
-	height     int32 // Height of the shared area bounding box
+	minX       int32 // left edge of the shared area bounding box
+	minY       int32 // top edge of the shared area bounding box
+	width      int32 // width of the shared area bounding box
+	height     int32 // height of the shared area bounding box
 	streams    []stream
 }
 
+// stream describes one screen-cast source returned by the portal.
+// Position (x, y) may be negative in multi-monitor setups; size (w, h) is
+// always positive.
 type stream struct {
 	id   uint32
 	x, y int32
 	w, h uint32
 }
 
-// NewPortal creates a new Portal instance.
+// NewPortal creates a new Portal instance connected to the session D-Bus.
 func NewPortal() (*Portal, error) {
-	connection, err := dbus.SessionBus()
+	conn, err := dbus.SessionBus()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to session bus: %w", err)
 	}
-
-	return &Portal{connection: connection}, nil
+	return &Portal{connection: conn}, nil
 }
 
-// InitSession initializes the portal session by performing the handshake.
+// InitSession performs the XDG portal handshake and starts the session.
 func (p *Portal) InitSession() error {
 	sessionHandle, err := p.createSession()
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
 	p.session = sessionHandle
-
-	if err := p.startSession(); err != nil {
-		return fmt.Errorf("session startup failed: %w", err)
-	}
-
-	return nil
+	return p.startSession()
 }
 
-// Close closes the portal session and the DBus connection.
+// Close terminates the portal session and the underlying D-Bus connection.
 func (p *Portal) Close() {
 	if p.session != "" {
 		p.connection.Object(portalDestination, p.session).
@@ -114,17 +117,18 @@ func (p *Portal) Close() {
 	p.connection.Close()
 }
 
-// Screenshot takes a screenshot and returns the raw bytes.
+// Screenshot captures the screen and returns the image as PNG bytes.
+// If the session covers only part of the desktop, the image is cropped to
+// the shared area so callers see only what was granted.
 func (p *Portal) Screenshot() ([]byte, error) {
 	options := map[string]dbus.Variant{
 		"handle_token": dbus.MakeVariant(newToken("wayland_mcp_shot_")),
 		"interactive":  dbus.MakeVariant(false),
 	}
-
 	responses, err := p.awaitResponses(func() ([]dbus.ObjectPath, error) {
 		var requestPath dbus.ObjectPath
-		if err := p.call(methodScreenshot, "", options).
-			Store(&requestPath); err != nil {
+		err := p.dbusCall(methodScreenshot, "", options).Store(&requestPath)
+		if err != nil {
 			return nil, err
 		}
 		return []dbus.ObjectPath{requestPath}, nil
@@ -133,17 +137,13 @@ func (p *Portal) Screenshot() ([]byte, error) {
 		return nil, fmt.Errorf("screenshot failed: %w", err)
 	}
 
-	var response map[string]dbus.Variant
-	for _, r := range responses {
-		response = r
-		break
-	}
+	// There is exactly one response.
+	response := first(responses)
 
 	uri, ok := response["uri"].Value().(string)
 	if !ok {
 		return nil, ErrNoURIInResponse
 	}
-
 	path := strings.TrimPrefix(uri, "file://")
 	defer os.Remove(path)
 
@@ -152,88 +152,96 @@ func (p *Portal) Screenshot() ([]byte, error) {
 		return nil, fmt.Errorf("failed to read screenshot file: %w", err)
 	}
 
-	// Crop the screenshot to match the shared streams bounding box.
-	// This ensures that if the user shared only one monitor in a multi-monitor
-	// setup, the agent doesn't see the other monitors in the screenshot.
+	// Crop to the shared-streams bounding box so the agent only sees the portion
+	// of the desktop the user explicitly granted access to.
 	if p.width > 0 && p.height > 0 {
-		img, _, err := image.Decode(bytes.NewReader(data))
+		cropped, err := cropImage(
+			data,
+			int(p.minX),
+			int(p.minY),
+			int(p.width),
+			int(p.height),
+		)
 		if err == nil {
-			bounds := img.Bounds()
-			// If the screenshot is larger than our shared area, we crop it.
-			if bounds.Dx() > int(p.width) || bounds.Dy() > int(p.height) {
-				if si, ok := img.(interface {
-					SubImage(r image.Rectangle) image.Image
-				}); ok {
-					rect := image.Rect(
-						int(p.minX), int(p.minY),
-						int(p.minX+p.width), int(p.minY+p.height),
-					)
-					// Intersect with actual image bounds to be safe
-					rect = rect.Intersect(bounds)
-					cropped := si.SubImage(rect)
-
-					var buf bytes.Buffer
-					if err := png.Encode(&buf, cropped); err == nil {
-						return buf.Bytes(), nil
-					}
-				}
-			}
+			return cropped, nil
 		}
-		// If decoding/cropping fails, we fall back to the original image
-		// but coordinates might be misaligned.
+		// Decoding or cropping failed; fall back to the original image.
+		// Coordinates may be misaligned in this case.
 	}
-
 	return data, nil
 }
 
-// MovePointer simulates mouse movement to absolute coordinates (0.0 to 1.0).
+// cropImage decodes src, crops it to the rectangle defined by (x, y, w, h),
+// and re-encodes the result as PNG. It returns an error if decoding  encoding
+// fails, or if the crop rectangle does not intersect the image.
+func cropImage(src []byte, x, y, w, h int) ([]byte, error) {
+	img, _, err := image.Decode(bytes.NewReader(src))
+	if err != nil {
+		return nil, err
+	}
+	si, ok := img.(interface {
+		SubImage(image.Rectangle) image.Image
+	})
+	if !ok {
+		return nil, ErrSubImageCrop
+	}
+	rect := image.Rect(x, y, x+w, y+h).Intersect(img.Bounds())
+	if rect.Empty() {
+		return nil, ErrCropOutsideBounds
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, si.SubImage(rect)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// MovePointer moves the pointer to normalized coordinates in [0, 1].
 func (p *Portal) MovePointer(x, y float64) error {
 	if p.width == 0 || p.height == 0 {
 		return ErrDimensionsUnknown
 	}
+	absX := x*float64(p.width) + float64(p.minX)
+	absY := y*float64(p.height) + float64(p.minY)
 
-	absoluteX := x*float64(p.width) + float64(p.minX)
-	absoluteY := y*float64(p.height) + float64(p.minY)
-
-	// Try session-relative motion (stream 0)
+	// Try session-relative motion first (stream ID 0).
 	err := p.call(
-		methodNotifyPointerMotionAbsolute, p.session,
-		map[string]dbus.Variant{}, uint32(0), absoluteX, absoluteY,
-	).Err
+		methodNotifyPointerMotionAbsolute,
+		map[string]dbus.Variant{}, uint32(0), absX, absY,
+	)
 	if err == nil {
 		return nil
 	}
-
-	// Fallback: target a specific stream
-	s, relativeX, relativeY := p.findStream(absoluteX, absoluteY)
+	// Fall back to targeting the specific stream under the cursor.
+	s, relX, relY := p.findStream(absX, absY)
 	return p.call(
-		methodNotifyPointerMotionAbsolute, p.session,
-		map[string]dbus.Variant{}, s.id, relativeX, relativeY,
-	).Err
+		methodNotifyPointerMotionAbsolute,
+		map[string]dbus.Variant{}, s.id, relX, relY,
+	)
 }
 
-// Click simulates a mouse button press or release.
+// Click simulates a mouse button press (state=1) or release (state=0).
 func (p *Portal) Click(button, state uint32) error {
 	return p.call(
-		methodNotifyPointerButton, p.session,
+		methodNotifyPointerButton,
 		map[string]dbus.Variant{}, int32(button), state,
-	).Err
+	)
 }
 
-// Scroll simulates a mouse wheel scroll.
+// Scroll simulates a mouse wheel event with the given axis deltas.
 func (p *Portal) Scroll(deltaX, deltaY float64) error {
 	return p.call(
-		methodNotifyPointerAxis, p.session,
+		methodNotifyPointerAxis,
 		map[string]dbus.Variant{}, deltaX, deltaY,
-	).Err
+	)
 }
 
-// TypeKey simulates a keyboard key press or release using a keysym.
+// TypeKey simulates a key press (state=1) or release (state=0) by keysym.
 func (p *Portal) TypeKey(keysym, state uint32) error {
 	return p.call(
-		methodNotifyKeyboardKeysym, p.session,
+		methodNotifyKeyboardKeysym,
 		map[string]dbus.Variant{}, int32(keysym), state,
-	).Err
+	)
 }
 
 func (p *Portal) startSession() error {
@@ -274,37 +282,27 @@ func (p *Portal) startSession() error {
 		return ErrNoStreamsInResponse
 	}
 	p.streams = streams
-
 	p.minX, p.minY, p.width, p.height = calculateBounds(p.streams)
 	return nil
 }
 
-// calculateBounds finds the bounding box that encompasses all shared streams.
-// This is necessary for mapping normalized agent coordinates (0-1) to the
-// specific portion of the desktop that the user has shared.
+// calculateBounds returns the bounding box that encompasses all shared streams.
+// Needed to map normalized agent coordinates (0–1) to the granted desktop
+// region.
 func calculateBounds(streams []stream) (minX, minY, width, height int32) {
 	if len(streams) == 0 {
 		return 0, 0, 0, 0
 	}
-
-	minX, minY = streams[0].x, streams[0].y
-	maxX, maxY := minX+int32(streams[0].w), minY+int32(streams[0].h)
-
+	minX = streams[0].x
+	minY = streams[0].y
+	maxX := minX + int32(streams[0].w)
+	maxY := minY + int32(streams[0].h)
 	for _, s := range streams[1:] {
-		if s.x < minX {
-			minX = s.x
-		}
-		if s.y < minY {
-			minY = s.y
-		}
-		if right := s.x + int32(s.w); right > maxX {
-			maxX = right
-		}
-		if bottom := s.y + int32(s.h); bottom > maxY {
-			maxY = bottom
-		}
+		minX = min(minX, s.x)
+		minY = min(minY, s.y)
+		maxX = max(maxX, s.x+int32(s.w))
+		maxY = max(maxY, s.y+int32(s.h))
 	}
-
 	return minX, minY, maxX - minX, maxY - minY
 }
 
@@ -314,23 +312,19 @@ func (p *Portal) createSession() (dbus.ObjectPath, error) {
 		"session_handle_token": dbus.MakeVariant(token),
 		"handle_token":         dbus.MakeVariant(token + "_req"),
 	}
-
 	var requestPath dbus.ObjectPath
-	if err := p.call(methodCreateSession, options).
-		Store(&requestPath); err != nil {
+	err := p.dbusCall(methodCreateSession, options).Store(&requestPath)
+	if err != nil {
 		return "", fmt.Errorf("CreateSession call failed: %w", err)
 	}
-
 	response, err := p.waitForResponse(requestPath)
 	if err != nil {
 		return "", err
 	}
-
 	sessionHandle, ok := response["session_handle"].Value().(string)
 	if !ok {
-		return "", errors.New("no session_handle in response")
+		return "", ErrNoSessionHandle
 	}
-
 	return dbus.ObjectPath(sessionHandle), nil
 }
 
@@ -341,13 +335,10 @@ func (p *Portal) requestSources() (dbus.ObjectPath, error) {
 		"multiple":     dbus.MakeVariant(true),
 		"cursor_mode":  dbus.MakeVariant(cursorModeEmbedded),
 	}
-
-	var requestPath dbus.ObjectPath
-	if err := p.call(methodSelectSources, p.session, options).
-		Store(&requestPath); err != nil {
+	requestPath, err := p.request(methodSelectSources, options)
+	if err != nil {
 		return "", fmt.Errorf("SelectSources call failed: %w", err)
 	}
-
 	return requestPath, nil
 }
 
@@ -356,13 +347,10 @@ func (p *Portal) requestDevices() (dbus.ObjectPath, error) {
 		"handle_token": dbus.MakeVariant(newToken("wayland_mcp_sel_")),
 		"types":        dbus.MakeVariant(deviceTypeKeyboard | deviceTypePointer),
 	}
-
-	var requestPath dbus.ObjectPath
-	if err := p.call(methodSelectDevices, p.session, options).
-		Store(&requestPath); err != nil {
+	requestPath, err := p.request(methodSelectDevices, options)
+	if err != nil {
 		return "", fmt.Errorf("SelectDevices call failed: %w", err)
 	}
-
 	return requestPath, nil
 }
 
@@ -370,17 +358,24 @@ func (p *Portal) requestStart() (dbus.ObjectPath, error) {
 	options := map[string]dbus.Variant{
 		"handle_token": dbus.MakeVariant(newToken("wayland_mcp_start_")),
 	}
-
-	var requestPath dbus.ObjectPath
-	if err := p.call(methodStart, p.session, "", options).
-		Store(&requestPath); err != nil {
+	requestPath, err := p.request(methodStart, noParentWindow, options)
+	if err != nil {
 		return "", fmt.Errorf("Start call failed: %w", err)
 	}
-
 	return requestPath, nil
 }
 
-func (p *Portal) call(method string, args ...any) *dbus.Call {
+func (p *Portal) call(method string, args ...any) error {
+	return p.dbusCall(method, append([]any{p.session}, args...)...).Err
+}
+
+func (p *Portal) request(method string, args ...any) (dbus.ObjectPath, error) {
+	var path dbus.ObjectPath
+	err := p.dbusCall(method, append([]any{p.session}, args...)...).Store(&path)
+	return path, err
+}
+
+func (p *Portal) dbusCall(method string, args ...any) *dbus.Call {
 	return p.connection.Object(portalDestination, portalPath).
 		Call(method, 0, args...)
 }
@@ -391,13 +386,11 @@ func parseStreams(rawStreams [][]any) ([]stream, error) {
 		if len(streamData) < 2 {
 			continue
 		}
-
 		id, ok1 := streamData[0].(uint32)
 		options, ok2 := streamData[len(streamData)-1].(map[string]dbus.Variant)
 		if !ok1 || !ok2 {
 			continue
 		}
-
 		s := stream{id: id}
 		if v, ok := options["position"]; ok {
 			if coords, ok := variantToInt32Slice(v); ok && len(coords) >= 2 {
@@ -405,15 +398,14 @@ func parseStreams(rawStreams [][]any) ([]stream, error) {
 			}
 		}
 		if v, ok := options["size"]; ok {
-			if dims, ok := variantToInt32Slice(v); ok && len(dims) >= 2 {
-				s.w, s.h = uint32(dims[0]), uint32(dims[1])
-			} else {
+			dims, ok := variantToInt32Slice(v)
+			if !ok || len(dims) < 2 {
 				return nil, fmt.Errorf("stream %d has invalid 'size' property", id)
 			}
+			s.w, s.h = uint32(dims[0]), uint32(dims[1])
 		} else {
 			return nil, fmt.Errorf("stream %d missing required 'size' property", id)
 		}
-
 		streams = append(streams, s)
 	}
 	return streams, nil
@@ -424,10 +416,7 @@ func variantToInt32Slice(v dbus.Variant) ([]int32, bool) {
 	if v.Store(&out) == nil {
 		return out, true
 	}
-	// Try as struct (ii) or similar
-	var s struct {
-		X, Y int32
-	}
+	var s struct{ X, Y int32 }
 	if v.Store(&s) == nil {
 		return []int32{s.X, s.Y}, true
 	}
@@ -447,7 +436,7 @@ func (p *Portal) waitForResponse(
 }
 
 func (p *Portal) awaitResponses(
-	issue func() ([]dbus.ObjectPath, error),
+	submit func() ([]dbus.ObjectPath, error),
 ) (map[dbus.ObjectPath]map[string]dbus.Variant, error) {
 	signalChan, stop, err := p.setupResponseListener()
 	if err != nil {
@@ -455,11 +444,10 @@ func (p *Portal) awaitResponses(
 	}
 	defer stop()
 
-	paths, err := issue()
+	paths, err := submit()
 	if err != nil {
 		return nil, err
 	}
-
 	return collectResponses(signalChan, paths...)
 }
 
@@ -468,44 +456,38 @@ func collectResponses(
 	paths ...dbus.ObjectPath,
 ) (map[dbus.ObjectPath]map[string]dbus.Variant, error) {
 	results := make(map[dbus.ObjectPath]map[string]dbus.Variant)
-	pending := make(map[dbus.ObjectPath]bool)
+	pending := make(map[dbus.ObjectPath]bool, len(paths))
 	for _, path := range paths {
 		pending[path] = true
 	}
 
 	for signal := range signalChan {
-		if signal.Name != signalResponse {
+		if signal.Name != signalResponse || !pending[signal.Path] {
 			continue
 		}
-
-		if !pending[signal.Path] {
-			continue
-		}
-
 		if len(signal.Body) < 2 {
 			return nil, ErrInvalidResponseBody
 		}
-
 		code, ok := signal.Body[0].(uint32)
-		if !ok || code != 0 {
+		if !ok {
+			return nil, ErrInvalidResponseBody
+		}
+		if code != 0 {
 			return nil, fmt.Errorf(
-				"portal request failed (path=%s, code=%d)", signal.Path, code,
+				"portal request cancelled or denied (path=%s, code=%d)",
+				signal.Path, code,
 			)
 		}
-
 		result, ok := signal.Body[1].(map[string]dbus.Variant)
 		if !ok {
 			return nil, ErrInvalidResultsType
 		}
-
 		results[signal.Path] = result
 		delete(pending, signal.Path)
-
 		if len(pending) == 0 {
 			return results, nil
 		}
 	}
-
 	return nil, ErrSignalChannelClosed
 }
 
@@ -517,10 +499,8 @@ func (p *Portal) setupResponseListener() (chan *dbus.Signal, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-
 	signalChan := make(chan *dbus.Signal, 100)
 	p.connection.Signal(signalChan)
-
 	stop := func() {
 		p.connection.RemoveSignal(signalChan)
 		p.connection.RemoveMatchSignal(
@@ -528,39 +508,37 @@ func (p *Portal) setupResponseListener() (chan *dbus.Signal, func(), error) {
 			dbus.WithMatchMember(responseMember),
 		)
 	}
-
 	return signalChan, stop, nil
 }
 
-func (p *Portal) findStream(
-	absoluteX,
-	absoluteY float64,
-) (s stream, relativeX, relativeY float64) {
-	if len(p.streams) == 0 {
-		return stream{}, absoluteX, absoluteY
-	}
-
-	for _, candidate := range p.streams {
-		if int32(absoluteX) >= candidate.x &&
-			int32(absoluteX) < candidate.x+int32(candidate.w) &&
-			int32(absoluteY) >= candidate.y &&
-			int32(absoluteY) < candidate.y+int32(candidate.h) {
-			return candidate,
-				absoluteX - float64(candidate.x),
-				absoluteY - float64(candidate.y)
+func (p *Portal) findStream(absX, absY float64) (stream, float64, float64) {
+	for _, s := range p.streams {
+		if absX >= float64(s.x) && absX < float64(s.x+int32(s.w)) &&
+			absY >= float64(s.y) && absY < float64(s.y+int32(s.h)) {
+			return s, absX - float64(s.x), absY - float64(s.y)
 		}
 	}
-
-	s = p.streams[0]
-	relativeX = clamp(absoluteX-float64(s.x), 0, float64(s.w)-1)
-	relativeY = clamp(absoluteY-float64(s.y), 0, float64(s.h)-1)
-	return
+	// Point is outside all streams; clamp to the first stream.
+	s := p.streams[0]
+	return s,
+		clamp(absX-float64(s.x), 0, float64(s.w)-1),
+		clamp(absY-float64(s.y), 0, float64(s.h)-1)
 }
 
+// newToken generates a unique D-Bus handle token with the given prefix.
 func newToken(prefix string) string {
 	return prefix + strings.ReplaceAll(uuid.New().String(), "-", "")
 }
 
-func clamp(v, minV, maxV float64) float64 {
-	return min(maxV, max(minV, v))
+func clamp(v, lo, hi float64) float64 {
+	return max(lo, min(v, hi))
+}
+
+// first returns an arbitrary value from m. Intended for single-entry maps.
+func first[K comparable, V any](m map[K]V) V {
+	for _, v := range m {
+		return v
+	}
+	var zero V
+	return zero
 }
