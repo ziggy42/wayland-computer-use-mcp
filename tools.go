@@ -24,41 +24,93 @@ func getTools(p *portal) []tool {
 	return []tool{
 		{
 			info: mcp.NewTool("screenshot",
-				mcp.WithDescription("Capture the current screen state"),
+				mcp.WithDescription(
+					"Take a screenshot of the current screen to see the visual state. "+
+						"Always use this to visually verify the outcome of your actions "+
+						"or to understand the current screen context before acting.",
+				),
 			),
 			handler: screenshotHandler(p),
 		},
 		{
 			info: mcp.NewTool("click",
-				mcp.WithDescription("Simulate a mouse click at specific coordinates"),
-				mcp.WithNumber("x", mcp.Description("X coordinate (0-1)"), mcp.Required()),
-				mcp.WithNumber("y", mcp.Description("Y coordinate (0-1)"), mcp.Required()),
+				mcp.WithDescription(
+					"Simulate a mouse click at specific screen coordinates. The "+
+						"pointer will be moved to the coordinates and a press/release "+
+						"event sent.",
+				),
+				mcp.WithNumber(
+					"x",
+					mcp.Description(
+						"X coordinate as a fraction of the screen width (0.0 to 1.0). "+
+							"For example, 0.5 is the horizontal center.",
+					),
+					mcp.Required(),
+				),
+				mcp.WithNumber(
+					"y",
+					mcp.Description(
+						"Y coordinate as a fraction of the screen height (0.0 to 1.0). "+
+							"For example, 0.5 is the vertical center.",
+					),
+					mcp.Required(),
+				),
 				mcp.WithNumber(
 					"button",
-					mcp.Description("Button to click (1: left, 2: middle, 3: right)"),
+					mcp.Description(
+						"Mouse button to click (1: left, 2: middle, 3: right). Defaults "+
+							"to 1 (left-click) if not specified.",
+					),
 				),
 			),
 			handler: clickHandler(p),
 		},
 		{
 			info: mcp.NewTool("scroll",
-				mcp.WithDescription("Simulate mouse wheel scrolling"),
-				mcp.WithNumber("dx", mcp.Description("Horizontal scroll amount")),
-				mcp.WithNumber("dy", mcp.Description("Vertical scroll amount")),
+				mcp.WithDescription(
+					"Simulate mouse wheel scrolling. Useful for scrolling through long "+
+						"web pages, documents, or lists.",
+				),
+				mcp.WithNumber(
+					"dx",
+					mcp.Description(
+						"Horizontal scroll amount. Positive values scroll right, "+
+							"negative values scroll left. Defaults to 0.",
+					),
+				),
+				mcp.WithNumber(
+					"dy",
+					mcp.Description(
+						"Vertical scroll amount. Positive values scroll down, negative "+
+							"values scroll up. Defaults to 0.",
+					),
+				),
 			),
 			handler: scrollHandler(p),
 		},
 		{
 			info: mcp.NewTool("type_text",
-				mcp.WithDescription("Simulate typing a string of text"),
-				mcp.WithString("text", mcp.Description("Text to type"), mcp.Required()),
+				mcp.WithDescription(
+					"Simulate typing a string of text character by character. This "+
+						"sends individual key press and release events. Best for "+
+						"inputting text into active/focused text fields.",
+				),
+				mcp.WithString(
+					"text",
+					mcp.Description(
+						"The exact string of text to type. Special characters like "+
+							"newlines (\\n) and tabs (\\t) are supported.",
+					),
+					mcp.Required(),
+				),
 			),
 			handler: typeTextHandler(p),
 		},
 		{
 			info: mcp.NewTool("get_system_info",
 				mcp.WithDescription(
-					"Get information about the current system, OS, and desktop environment",
+					"Get basic information about the current operating system, "+
+						"architecture, and Wayland/desktop environment session.",
 				),
 			),
 			handler: systemInfoHandler(),
@@ -66,26 +118,42 @@ func getTools(p *portal) []tool {
 		{
 			info: mcp.NewTool("press_key",
 				mcp.WithDescription(
-					"Simulate pressing a specific key (with optional modifiers)",
+					"Simulate pressing a specific keyboard key, optionally with "+
+						"modifier keys held down. Useful for triggering keyboard "+
+						"shortcuts or sending special control keys.",
 				),
 				mcp.WithString(
 					"key",
-					mcp.Description("Key name (e.g., Enter, Escape, a, b, c)"),
+					mcp.Description(
+						"Name of the primary key to press (e.g., 'Enter', 'Escape', "+
+							"'Tab', 'Space', 'a', '1', 'Left', 'Page_Down').",
+					),
 					mcp.Required(),
 				),
 				mcp.WithString(
 					"modifiers",
-					mcp.Description("Comma-separated modifiers (e.g., super, ctrl)"),
+					mcp.Description(
+						"Optional comma-separated list of modifier keys to hold (e.g., "+
+							"'ctrl', 'shift', 'alt', 'super', 'meta'). For example, to "+
+							"press Ctrl+C, set key='c' and modifiers='ctrl'.",
+					),
 				),
 			),
 			handler: pressKeyHandler(p),
 		},
 		{
 			info: mcp.NewTool("wait",
-				mcp.WithDescription("Wait for a specified duration"),
+				mcp.WithDescription(
+					"Pause execution for a specified number of seconds. Crucial for "+
+						"waiting for UI animations to complete, pages to load, or "+
+						"transient states to settle before taking the next action.",
+				),
 				mcp.WithNumber(
 					"seconds",
-					mcp.Description("Number of seconds to wait"),
+					mcp.Description(
+						"Number of seconds to wait. Can be a fractional value (e.g., 0.5 "+
+							"for half a second).",
+					),
 					mcp.Required(),
 				),
 			),
@@ -257,7 +325,7 @@ func typeTextHandler(p *portal) server.ToolHandlerFunc {
 
 		for _, r := range text {
 			keysym := uint32(r)
-			// For Unicode characters above U+00FF (e.g., emojis, Cyrillic), the XKB
+			// For Unicode characters above U+00FF (e.g., emojis), the XKB
 			// specification requires the keysym to be constructed as
 			// 0x01000000 | unicode.
 			if r > 0x00FF {
