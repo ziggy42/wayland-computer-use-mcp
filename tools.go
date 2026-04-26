@@ -116,6 +116,10 @@ func screenshotHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
+		if err := p.Ready(); err != nil {
+			return portalError(err)
+		}
+
 		data, err := p.Screenshot()
 		if err != nil {
 			return mcp.NewToolResultError(
@@ -135,6 +139,10 @@ func clickHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
+		if err := p.Ready(); err != nil {
+			return portalError(err)
+		}
+
 		x := request.GetFloat("x", -1)
 		y := request.GetFloat("y", -1)
 		if x < 0 || y < 0 {
@@ -171,6 +179,10 @@ func scrollHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
+		if err := p.Ready(); err != nil {
+			return portalError(err)
+		}
+
 		dx := request.GetFloat("dx", 0)
 		dy := request.GetFloat("dy", 0)
 
@@ -224,6 +236,10 @@ func typeTextHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
+		if err := p.Ready(); err != nil {
+			return portalError(err)
+		}
+
 		text, err := request.RequireString("text")
 		if err != nil {
 			return mcp.NewToolResultError("Missing text"), nil
@@ -258,6 +274,10 @@ func pressKeyHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
+		if err := p.Ready(); err != nil {
+			return portalError(err)
+		}
+
 		keyName, err := request.RequireString("key")
 		if err != nil {
 			return mcp.NewToolResultError("Missing key"), nil
@@ -343,4 +363,10 @@ func keysymFromName(name string) uint32 {
 		return 0xFF57
 	}
 	return 0
+}
+
+func portalError(err error) (*mcp.CallToolResult, error) {
+	return mcp.NewToolResultError(
+		fmt.Sprintf("Portal not available: %v", err),
+	), nil
 }

@@ -65,6 +65,7 @@ var (
 	ErrSubImageCrop        = errors.New("image does not support sub-image cropping")
 	ErrCropOutsideBounds   = errors.New("crop rectangle is outside image bounds")
 	ErrNoSessionHandle     = errors.New("no session_handle in response")
+	ErrPortalNotReady      = errors.New("waiting for user to grant permissions, please retry")
 )
 
 // Portal manages a connection to the XDG Desktop Portal service via D-Bus.
@@ -72,12 +73,22 @@ var (
 // providing methods for taking screenshots and simulating user input.
 type Portal struct {
 	connection *dbus.Conn
-	session    dbus.ObjectPath
-	minX       int32 // left edge of the shared area bounding box
-	minY       int32 // top edge of the shared area bounding box
-	width      int32 // width of the shared area bounding box
-	height     int32 // height of the shared area bounding box
-	streams    []stream
+
+	// ready is closed by InitSession when the portal handshake completes
+	// successfully or not. Closing the channel establishes a happens-before
+	// edge per the Go memory model, so all writes to the fields below (initErr,
+	// session, streams, bounds) are visible to any goroutine that reads from
+	// this channel. This lets tool handlers call Ready() to safely check portal
+	// state without a mutex.
+	ready   chan struct{}
+	initErr error // set before ready is closed; read-only after
+
+	session dbus.ObjectPath
+	minX    int32 // left edge of the shared area bounding box
+	minY    int32 // top edge of the shared area bounding box
+	width   int32 // width of the shared area bounding box
+	height  int32 // height of the shared area bounding box
+	streams []stream
 }
 
 // stream describes one screen-cast source returned by the portal.
@@ -95,17 +106,32 @@ func NewPortal() (*Portal, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to session bus: %w", err)
 	}
-	return &Portal{connection: conn}, nil
+	return &Portal{connection: conn, ready: make(chan struct{})}, nil
 }
 
-// InitSession performs the XDG portal handshake and starts the session.
-func (p *Portal) InitSession() error {
+// InitSession performs the XDG portal handshake. It closes the ready channel
+// when done, storing any error in initErr.
+func (p *Portal) InitSession() {
+	defer close(p.ready)
 	sessionHandle, err := p.createSession()
 	if err != nil {
-		return fmt.Errorf("failed to create session: %w", err)
+		p.initErr = fmt.Errorf("failed to create session: %w", err)
+		return
 	}
 	p.session = sessionHandle
-	return p.startSession()
+	p.initErr = p.startSession()
+}
+
+// Ready returns nil if the portal session is initialized and usable. Returns
+// ErrPortalNotReady if initialization is in progress, or the init error if it
+// failed.
+func (p *Portal) Ready() error {
+	select {
+	case <-p.ready:
+		return p.initErr
+	default:
+		return ErrPortalNotReady
+	}
 }
 
 // Close terminates the portal session and the underlying D-Bus connection.

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"fmt"
 	"log"
-	"os"
 
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -20,14 +18,10 @@ func main() {
 	}
 	defer p.Close()
 
-	// Initialize portal in the background to avoid blocking the server startup.
-	// InitSession requires the user to interact with the portal UI to grant
-	// permissions to control the desktop.
-	go func() {
-		if err := p.InitSession(); err != nil {
-			fmt.Fprintf(os.Stderr, "Portal initialization failed: %v\n", err)
-		}
-	}()
+	// Initialize portal in the background. InitSession requires
+	// the user to interact with the portal UI to grant permissions.
+	// Tool handlers check p.Ready() before using portal features.
+	go p.InitSession()
 
 	s := server.NewMCPServer(serverName, serverVersion, server.WithLogging())
 
