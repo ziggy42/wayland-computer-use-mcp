@@ -159,6 +159,37 @@ func getTools(p *portal) []tool {
 			),
 			handler: waitHandler(),
 		},
+		{
+			info: mcp.NewTool("reset_screen_permission",
+				mcp.WithDescription(
+					"Reset the saved ScreenCast permission token. Use this if the "+
+						"screen layout changed, or if you need to force a new selection "+
+						"of screens to capture. This requires the user to restart the "+
+						"server or wait for a new system prompt on the next capture.",
+				),
+			),
+			handler: resetScreenPermissionHandler(),
+		},
+	}
+}
+
+// resetScreenPermissionHandler returns a handler for the
+// "reset_screen_permission" tool.
+func resetScreenPermissionHandler() server.ToolHandlerFunc {
+	return func(
+		ctx context.Context,
+		request mcp.CallToolRequest,
+	) (*mcp.CallToolResult, error) {
+		if err := os.Remove(restoreTokenPath()); err != nil && !os.IsNotExist(err) {
+			return mcp.NewToolResultError(
+				fmt.Sprintf("Failed to reset screen permission: %v", err),
+			), nil
+		}
+		return mcp.NewToolResultText(
+			"Screen permission reset successfully. The next time the server " +
+				"starts or a capture is requested after failure, a new system " +
+				"prompt will appear.",
+		), nil
 	}
 }
 

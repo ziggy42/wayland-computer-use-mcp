@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -133,7 +134,11 @@ func (p *portal) startSession(
 		if v, ok := response["streams"]; ok {
 			if s, ok := storeVariant[[][]any](v); ok {
 				rawStreams = s
-				break
+			}
+		}
+		if v, ok := response["restore_token"]; ok {
+			if token, ok := storeVariant[string](v); ok {
+				_ = saveRestoreToken(token)
 			}
 		}
 	}
@@ -204,6 +209,10 @@ func (p *portal) requestDevices(
 	options := map[string]dbus.Variant{
 		"handle_token": dbus.MakeVariant(newToken("wayland_mcp_sel_")),
 		"types":        dbus.MakeVariant(deviceTypeKeyboard | deviceTypePointer),
+		"persist_mode": dbus.MakeVariant(uint32(2)),
+	}
+	if token := readRestoreToken(); token != "" {
+		options["restore_token"] = dbus.MakeVariant(token)
 	}
 	requestPath, err := portalRequest(
 		p.connection, handle, methodSelectDevices, options,
@@ -227,4 +236,28 @@ func (p *portal) requestStart(
 		return "", fmt.Errorf("Start call failed: %w", err)
 	}
 	return requestPath, nil
+}
+
+func restoreTokenPath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		configDir = os.TempDir()
+	}
+	return filepath.Join(configDir, "wayland-computer-use-mcp", "restore_token")
+}
+
+func readRestoreToken() string {
+	data, err := os.ReadFile(restoreTokenPath())
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func saveRestoreToken(token string) error {
+	path := restoreTokenPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(token), 0600)
 }
