@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -13,33 +14,33 @@ const (
 	deviceTypePointer  uint32 = 2
 )
 
-// Portal manages the D-Bus connection and the lifecycle of a Remote Desktop /
-// ScreenCast session. Use Session() to obtain the active Session.
-type Portal struct {
+// portal manages the D-Bus connection and the lifecycle of a Remote Desktop /
+// ScreenCast session.
+type portal struct {
 	connection *dbus.Conn
 
-	// ready is closed by InitSession when the portal handshake completes
+	// ready is closed by initSession when the portal handshake completes
 	// successfully or not. Closing the channel establishes a happens-before
 	// edge per the Go memory model, so the write to session/initErr is
 	// visible to any goroutine that reads from this channel. This lets tool
-	// handlers call Session() to safely obtain the Session without a mutex.
+	// handlers call getSession() to safely obtain the session without a mutex.
 	ready   chan struct{}
 	initErr error    // set before ready is closed; read-only after
-	session *Session // set before ready is closed; nil on failure
+	session *session // set before ready is closed; nil on failure
 }
 
-// NewPortal creates a new Portal instance connected to the session D-Bus.
-func NewPortal() (*Portal, error) {
+// newPortal creates a new portal instance connected to the session D-Bus.
+func newPortal() (*portal, error) {
 	conn, err := dbus.SessionBus()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to session bus: %w", err)
 	}
-	return &Portal{connection: conn, ready: make(chan struct{})}, nil
+	return &portal{connection: conn, ready: make(chan struct{})}, nil
 }
 
-// InitSession performs the XDG portal handshake. It closes the ready channel
-// when done, storing either a usable Session or an error.
-func (p *Portal) InitSession() {
+// initSession performs the XDG portal handshake. It closes the ready channel
+// when done, storing either a usable session or an error.
+func (p *portal) initSession() {
 	defer close(p.ready)
 	handle, err := p.createSession()
 	if err != nil {
@@ -54,28 +55,29 @@ func (p *Portal) InitSession() {
 	p.session = session
 }
 
-// Session returns the active Session if initialization succeeded. Returns nil
-// and ErrPortalNotReady if initialization is in progress, or the init error if
-// it failed.
-func (p *Portal) Session() (*Session, error) {
+// getSession returns the active session if initialization succeeded. Returns
+// nil and errPortalNotReady if initialization is in progress, or the init error
+// if it failed.
+func (p *portal) getSession() (*session, error) {
 	select {
 	case <-p.ready:
 		return p.session, p.initErr
 	default:
-		return nil, ErrPortalNotReady
+		return nil, errPortalNotReady
 	}
 }
 
-// Close terminates the portal session and the underlying D-Bus connection.
-func (p *Portal) Close() {
+// close terminates the portal session and the underlying D-Bus connection.
+func (p *portal) close() {
 	if p.session != nil {
+		p.session.close()
 		p.connection.Object(portalDestination, p.session.handle).
 			Call(methodSessionClose, 0)
 	}
 	p.connection.Close()
 }
 
-func (p *Portal) createSession() (dbus.ObjectPath, error) {
+func (p *portal) createSession() (dbus.ObjectPath, error) {
 	token := newToken("wayland_mcp_")
 	options := map[string]dbus.Variant{
 		"session_handle_token": dbus.MakeVariant(token),
@@ -94,14 +96,14 @@ func (p *Portal) createSession() (dbus.ObjectPath, error) {
 	}
 	sessionHandle, ok := response["session_handle"].Value().(string)
 	if !ok {
-		return "", ErrNoSessionHandle
+		return "", errNoSessionHandle
 	}
 	return dbus.ObjectPath(sessionHandle), nil
 }
 
-func (p *Portal) startSession(
+func (p *portal) startSession(
 	handle dbus.ObjectPath,
-) (*Session, error) {
+) (*session, error) {
 	responses, err := awaitResponses(
 		p.connection,
 		func() ([]dbus.ObjectPath, error) {
@@ -141,11 +143,16 @@ func (p *Portal) startSession(
 		return nil, err
 	}
 	if len(streams) == 0 {
-		return nil, ErrNoStreamsInResponse
+		return nil, errNoStreamsInResponse
+	}
+
+	pwRemote, err := p.openPipeWireRemote(handle)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open PipeWire remote: %w", err)
 	}
 
 	minX, minY, width, height := calculateBounds(streams)
-	return &Session{
+	return &session{
 		connection: p.connection,
 		handle:     handle,
 		minX:       minX,
@@ -153,10 +160,27 @@ func (p *Portal) startSession(
 		width:      width,
 		height:     height,
 		streams:    streams,
+		pwRemote:   pwRemote,
 	}, nil
 }
 
-func (p *Portal) requestSources(
+func (p *portal) openPipeWireRemote(
+	handle dbus.ObjectPath,
+) (*os.File, error) {
+	var fd dbus.UnixFD
+	err := portalCall(
+		p.connection,
+		methodOpenPipeWireRemote,
+		handle,
+		map[string]dbus.Variant{},
+	).Store(&fd)
+	if err != nil {
+		return nil, fmt.Errorf("OpenPipeWireRemote call failed: %w", err)
+	}
+	return os.NewFile(uintptr(fd), "pipewire-remote"), nil
+}
+
+func (p *portal) requestSources(
 	handle dbus.ObjectPath,
 ) (dbus.ObjectPath, error) {
 	options := map[string]dbus.Variant{
@@ -174,7 +198,7 @@ func (p *Portal) requestSources(
 	return requestPath, nil
 }
 
-func (p *Portal) requestDevices(
+func (p *portal) requestDevices(
 	handle dbus.ObjectPath,
 ) (dbus.ObjectPath, error) {
 	options := map[string]dbus.Variant{
@@ -190,7 +214,7 @@ func (p *Portal) requestDevices(
 	return requestPath, nil
 }
 
-func (p *Portal) requestStart(
+func (p *portal) requestStart(
 	handle dbus.ObjectPath,
 ) (dbus.ObjectPath, error) {
 	options := map[string]dbus.Variant{

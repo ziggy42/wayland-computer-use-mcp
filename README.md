@@ -6,7 +6,7 @@ A high-performance, self-contained MCP (Model Context Protocol) server for Linux
 
 - **Non-Root**: Works within user session privileges using XDG Desktop Portals.
 - **Wayland Native**: Designed specifically for Wayland (GNOME, KDE, Sway, etc.).
-- **Self-Contained**: Statically linked Go binary with zero runtime dependencies.
+- **Minimal Dependencies**: Single Go binary; only requires GStreamer at runtime for screen capture.
 
 ## Tools Provided
 

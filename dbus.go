@@ -17,7 +17,6 @@ const (
 	// Interface names
 	remoteDesktopInterface = "org.freedesktop.portal.RemoteDesktop"
 	screenCastInterface    = "org.freedesktop.portal.ScreenCast"
-	screenshotInterface    = "org.freedesktop.portal.Screenshot"
 	sessionInterface       = "org.freedesktop.portal.Session"
 	requestInterface       = "org.freedesktop.portal.Request"
 
@@ -30,7 +29,7 @@ const (
 	methodNotifyPointerAxis           = remoteDesktopInterface + ".NotifyPointerAxis"
 	methodNotifyKeyboardKeysym        = remoteDesktopInterface + ".NotifyKeyboardKeysym"
 	methodSelectSources               = screenCastInterface + ".SelectSources"
-	methodScreenshot                  = screenshotInterface + ".Screenshot"
+	methodOpenPipeWireRemote          = screenCastInterface + ".OpenPipeWireRemote"
 	methodSessionClose                = sessionInterface + ".Close"
 
 	// Signal names
@@ -43,18 +42,16 @@ const (
 )
 
 var (
-	ErrDimensionsUnknown   = errors.New("screen dimensions unknown")
-	ErrInvalidResponseBody = errors.New("invalid response body")
-	ErrInvalidResultsType  = errors.New("invalid results type")
-	ErrSignalChannelClosed = errors.New("signal channel closed")
-	ErrNoURIInResponse     = errors.New("no uri in response")
-	ErrNoStreamsInResponse = errors.New("no streams found in start response")
-	ErrSubImageCrop        = errors.New("image does not support sub-image cropping")
-	ErrCropOutsideBounds   = errors.New("crop rectangle is outside image bounds")
-	ErrNoSessionHandle     = errors.New("no session_handle in response")
-	ErrPortalNotReady      = errors.New("waiting for user to grant permissions, please retry")
+	errDimensionsUnknown   = errors.New("screen dimensions unknown")
+	errInvalidResponseBody = errors.New("invalid response body")
+	errInvalidResultsType  = errors.New("invalid results type")
+	errSignalChannelClosed = errors.New("signal channel closed")
+	errNoStreamsInResponse = errors.New("no streams found in start response")
+	errNoSessionHandle     = errors.New("no session_handle in response")
+	errPortalNotReady      = errors.New("waiting for user to grant permissions, please retry")
 )
 
+// portalCall makes a D-Bus call to the portal destination and path.
 func portalCall(
 	conn *dbus.Conn, method string, args ...any,
 ) *dbus.Call {
@@ -62,6 +59,8 @@ func portalCall(
 		Call(method, 0, args...)
 }
 
+// portalRequest makes a D-Bus call and expects an object path as a response,
+// which is typical for portal methods that return a Request object.
 func portalRequest(
 	conn *dbus.Conn,
 	handle dbus.ObjectPath,
@@ -75,6 +74,8 @@ func portalRequest(
 	return path, err
 }
 
+// waitForResponse is a convenience wrapper around awaitResponses for a single
+// request path.
 func waitForResponse(
 	conn *dbus.Conn,
 	requestPath dbus.ObjectPath,
@@ -91,6 +92,8 @@ func waitForResponse(
 	return responses[requestPath], nil
 }
 
+// awaitResponses sets up a signal listener, submits a portal request (via the
+// submit callback), and collects the responses.
 func awaitResponses(
 	conn *dbus.Conn,
 	submit func() ([]dbus.ObjectPath, error),
@@ -108,6 +111,7 @@ func awaitResponses(
 	return collectResponses(signalChan, paths...)
 }
 
+// collectResponses waits for Response signals on the given paths.
 func collectResponses(
 	signalChan chan *dbus.Signal,
 	paths ...dbus.ObjectPath,
@@ -123,11 +127,11 @@ func collectResponses(
 			continue
 		}
 		if len(signal.Body) < 2 {
-			return nil, ErrInvalidResponseBody
+			return nil, errInvalidResponseBody
 		}
 		code, ok := signal.Body[0].(uint32)
 		if !ok {
-			return nil, ErrInvalidResponseBody
+			return nil, errInvalidResponseBody
 		}
 		if code != 0 {
 			return nil, fmt.Errorf(
@@ -137,7 +141,7 @@ func collectResponses(
 		}
 		result, ok := signal.Body[1].(map[string]dbus.Variant)
 		if !ok {
-			return nil, ErrInvalidResultsType
+			return nil, errInvalidResultsType
 		}
 		results[signal.Path] = result
 		delete(pending, signal.Path)
@@ -145,9 +149,11 @@ func collectResponses(
 			return results, nil
 		}
 	}
-	return nil, ErrSignalChannelClosed
+	return nil, errSignalChannelClosed
 }
 
+// setupResponseListener registers a match rule for Response signals and
+// returns a channel to receive them.
 func setupResponseListener(
 	conn *dbus.Conn,
 ) (chan *dbus.Signal, func(), error) {

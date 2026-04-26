@@ -1,21 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	"image/png"
 	"os"
-	"strings"
 
 	"github.com/godbus/dbus/v5"
 )
 
-// Session holds an active Remote Desktop + ScreenCast session. All fields are
+// session holds an active Remote Desktop + ScreenCast session. All fields are
 // immutable after construction.
-type Session struct {
+type session struct {
 	connection *dbus.Conn
 	handle     dbus.ObjectPath
 	minX       int32 // left edge of the shared area bounding box
@@ -23,6 +17,14 @@ type Session struct {
 	width      int32 // width of the shared area bounding box
 	height     int32 // height of the shared area bounding box
 	streams    []stream
+	pwRemote   *os.File // PipeWire remote FD for screen capture
+}
+
+func (s *session) close() error {
+	if s.pwRemote != nil {
+		s.pwRemote.Close()
+	}
+	return nil
 }
 
 // stream describes one screen-cast source returned by the portal.
@@ -34,69 +36,20 @@ type stream struct {
 	w, h uint32
 }
 
-// Screenshot captures the screen and returns the image as PNG bytes.
-// If the session covers only part of the desktop, the image is cropped to
-// the shared area so callers see only what was granted.
-func (s *Session) Screenshot() ([]byte, error) {
-	options := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(newToken("wayland_mcp_shot_")),
-		"interactive":  dbus.MakeVariant(false),
-	}
-	responses, err := awaitResponses(
-		s.connection,
-		func() ([]dbus.ObjectPath, error) {
-			var requestPath dbus.ObjectPath
-			err := portalCall(
-				s.connection, methodScreenshot, "", options,
-			).Store(&requestPath)
-			if err != nil {
-				return nil, err
-			}
-			return []dbus.ObjectPath{requestPath}, nil
-		},
+// screenshot captures the shared screens via PipeWire and returns a composited
+// PNG. For multi-monitor setups, each stream is captured separately and
+// painted onto a single canvas matching the layout.
+func (s *session) screenshot() ([]byte, error) {
+	return captureScreenshot(
+		s.pwRemote, s.streams,
+		s.minX, s.minY, s.width, s.height,
 	)
-	if err != nil {
-		return nil, fmt.Errorf("screenshot failed: %w", err)
-	}
-
-	// There is exactly one response.
-	response := first(responses)
-
-	uri, ok := response["uri"].Value().(string)
-	if !ok {
-		return nil, ErrNoURIInResponse
-	}
-	path := strings.TrimPrefix(uri, "file://")
-	defer os.Remove(path)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read screenshot file: %w", err)
-	}
-
-	// Crop to the shared-streams bounding box so the agent only sees the portion
-	// of the desktop the user explicitly granted access to.
-	if s.width > 0 && s.height > 0 {
-		cropped, err := cropImage(
-			data,
-			int(s.minX),
-			int(s.minY),
-			int(s.width),
-			int(s.height),
-		)
-		if err == nil {
-			return cropped, nil
-		}
-		// Decoding or cropping failed; fall back to the original image.
-		// Coordinates may be misaligned in this case.
-	}
-	return data, nil
 }
 
-// MovePointer moves the pointer to normalized coordinates in [0, 1].
-func (s *Session) MovePointer(x, y float64) error {
+// movePointer moves the pointer to normalized coordinates in [0, 1].
+func (s *session) movePointer(x, y float64) error {
 	if s.width == 0 || s.height == 0 {
-		return ErrDimensionsUnknown
+		return errDimensionsUnknown
 	}
 	absX := x*float64(s.width) + float64(s.minX)
 	absY := y*float64(s.height) + float64(s.minY)
@@ -117,37 +70,37 @@ func (s *Session) MovePointer(x, y float64) error {
 	)
 }
 
-// Click simulates a mouse button press (state=1) or release (state=0).
-func (s *Session) Click(button, state uint32) error {
+// click simulates a mouse button press (state=1) or release (state=0).
+func (s *session) click(button, state uint32) error {
 	return s.call(
 		methodNotifyPointerButton,
 		map[string]dbus.Variant{}, int32(button), state,
 	)
 }
 
-// Scroll simulates a mouse wheel event with the given axis deltas.
-func (s *Session) Scroll(deltaX, deltaY float64) error {
+// scroll simulates a mouse wheel event with the given axis deltas.
+func (s *session) scroll(deltaX, deltaY float64) error {
 	return s.call(
 		methodNotifyPointerAxis,
 		map[string]dbus.Variant{}, deltaX, deltaY,
 	)
 }
 
-// TypeKey simulates a key press (state=1) or release (state=0) by keysym.
-func (s *Session) TypeKey(keysym, state uint32) error {
+// typeKey simulates a key press (state=1) or release (state=0) by keysym.
+func (s *session) typeKey(keysym, state uint32) error {
 	return s.call(
 		methodNotifyKeyboardKeysym,
 		map[string]dbus.Variant{}, int32(keysym), state,
 	)
 }
 
-func (s *Session) call(method string, args ...any) error {
+func (s *session) call(method string, args ...any) error {
 	return portalCall(
 		s.connection, method, append([]any{s.handle}, args...)...,
 	).Err
 }
 
-func (s *Session) findStream(
+func (s *session) findStream(
 	absX, absY float64,
 ) (stream, float64, float64) {
 	for _, st := range s.streams {
@@ -161,31 +114,6 @@ func (s *Session) findStream(
 	return st,
 		clamp(absX-float64(st.x), 0, float64(st.w)-1),
 		clamp(absY-float64(st.y), 0, float64(st.h)-1)
-}
-
-// cropImage decodes src, crops it to the rectangle defined by (x, y, w, h),
-// and re-encodes the result as PNG. It returns an error if decoding/encoding
-// fails, or if the crop rectangle does not intersect the image.
-func cropImage(src []byte, x, y, w, h int) ([]byte, error) {
-	img, _, err := image.Decode(bytes.NewReader(src))
-	if err != nil {
-		return nil, err
-	}
-	si, ok := img.(interface {
-		SubImage(image.Rectangle) image.Image
-	})
-	if !ok {
-		return nil, ErrSubImageCrop
-	}
-	rect := image.Rect(x, y, x+w, y+h).Intersect(img.Bounds())
-	if rect.Empty() {
-		return nil, ErrCropOutsideBounds
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, si.SubImage(rect)); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
 
 // calculateBounds returns the bounding box that encompasses all shared streams.
@@ -253,13 +181,4 @@ func variantToInt32Slice(v dbus.Variant) ([]int32, bool) {
 
 func clamp(v, lo, hi float64) float64 {
 	return max(lo, min(v, hi))
-}
-
-// first returns an arbitrary value from m. Intended for single-entry maps.
-func first[K comparable, V any](m map[K]V) V {
-	for _, v := range m {
-		return v
-	}
-	var zero V
-	return zero
 }

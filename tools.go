@@ -13,23 +13,23 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// Tool represents an MCP tool and its handler.
-type Tool struct {
-	Info    mcp.Tool
-	Handler server.ToolHandlerFunc
+// tool represents an MCP tool and its handler.
+type tool struct {
+	info    mcp.Tool
+	handler server.ToolHandlerFunc
 }
 
-// GetTools returns all wayland-computer-use tools.
-func GetTools(p *Portal) []Tool {
-	return []Tool{
+// getTools returns all wayland-computer-use tools.
+func getTools(p *portal) []tool {
+	return []tool{
 		{
-			Info: mcp.NewTool("screenshot",
+			info: mcp.NewTool("screenshot",
 				mcp.WithDescription("Capture the current screen state"),
 			),
-			Handler: screenshotHandler(p),
+			handler: screenshotHandler(p),
 		},
 		{
-			Info: mcp.NewTool("click",
+			info: mcp.NewTool("click",
 				mcp.WithDescription("Simulate a mouse click at specific coordinates"),
 				mcp.WithNumber("x", mcp.Description("X coordinate (0-1)"), mcp.Required()),
 				mcp.WithNumber("y", mcp.Description("Y coordinate (0-1)"), mcp.Required()),
@@ -38,33 +38,33 @@ func GetTools(p *Portal) []Tool {
 					mcp.Description("Button to click (1: left, 2: middle, 3: right)"),
 				),
 			),
-			Handler: clickHandler(p),
+			handler: clickHandler(p),
 		},
 		{
-			Info: mcp.NewTool("scroll",
+			info: mcp.NewTool("scroll",
 				mcp.WithDescription("Simulate mouse wheel scrolling"),
 				mcp.WithNumber("dx", mcp.Description("Horizontal scroll amount")),
 				mcp.WithNumber("dy", mcp.Description("Vertical scroll amount")),
 			),
-			Handler: scrollHandler(p),
+			handler: scrollHandler(p),
 		},
 		{
-			Info: mcp.NewTool("type_text",
+			info: mcp.NewTool("type_text",
 				mcp.WithDescription("Simulate typing a string of text"),
 				mcp.WithString("text", mcp.Description("Text to type"), mcp.Required()),
 			),
-			Handler: typeTextHandler(p),
+			handler: typeTextHandler(p),
 		},
 		{
-			Info: mcp.NewTool("get_system_info",
+			info: mcp.NewTool("get_system_info",
 				mcp.WithDescription(
 					"Get information about the current system, OS, and desktop environment",
 				),
 			),
-			Handler: systemInfoHandler(),
+			handler: systemInfoHandler(),
 		},
 		{
-			Info: mcp.NewTool("press_key",
+			info: mcp.NewTool("press_key",
 				mcp.WithDescription(
 					"Simulate pressing a specific key (with optional modifiers)",
 				),
@@ -78,10 +78,10 @@ func GetTools(p *Portal) []Tool {
 					mcp.Description("Comma-separated modifiers (e.g., super, ctrl)"),
 				),
 			),
-			Handler: pressKeyHandler(p),
+			handler: pressKeyHandler(p),
 		},
 		{
-			Info: mcp.NewTool("wait",
+			info: mcp.NewTool("wait",
 				mcp.WithDescription("Wait for a specified duration"),
 				mcp.WithNumber(
 					"seconds",
@@ -89,11 +89,12 @@ func GetTools(p *Portal) []Tool {
 					mcp.Required(),
 				),
 			),
-			Handler: waitHandler(),
+			handler: waitHandler(),
 		},
 	}
 }
 
+// waitHandler returns a handler for the "wait" tool.
 func waitHandler() server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
@@ -111,17 +112,18 @@ func waitHandler() server.ToolHandlerFunc {
 	}
 }
 
-func screenshotHandler(p *Portal) server.ToolHandlerFunc {
+// screenshotHandler returns a handler for the "screenshot" tool.
+func screenshotHandler(p *portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		session, err := p.Session()
+		session, err := p.getSession()
 		if err != nil {
 			return portalError(err)
 		}
 
-		data, err := session.Screenshot()
+		data, err := session.screenshot()
 		if err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to take screenshot: %v", err),
@@ -135,12 +137,13 @@ func screenshotHandler(p *Portal) server.ToolHandlerFunc {
 	}
 }
 
-func clickHandler(p *Portal) server.ToolHandlerFunc {
+// clickHandler returns a handler for the "click" tool.
+func clickHandler(p *portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		session, err := p.Session()
+		session, err := p.getSession()
 		if err != nil {
 			return portalError(err)
 		}
@@ -153,20 +156,20 @@ func clickHandler(p *Portal) server.ToolHandlerFunc {
 
 		button := uint32(request.GetFloat("button", 1))
 
-		if err := session.MovePointer(x, y); err != nil {
+		if err := session.movePointer(x, y); err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to move pointer: %v", err),
 			), nil
 		}
 
 		// Press
-		if err := session.Click(button, 1); err != nil {
+		if err := session.click(button, 1); err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to press button: %v", err),
 			), nil
 		}
 		// Release
-		if err := session.Click(button, 0); err != nil {
+		if err := session.click(button, 0); err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to release button: %v", err),
 			), nil
@@ -176,12 +179,13 @@ func clickHandler(p *Portal) server.ToolHandlerFunc {
 	}
 }
 
-func scrollHandler(p *Portal) server.ToolHandlerFunc {
+// scrollHandler returns a handler for the "scroll" tool.
+func scrollHandler(p *portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		session, err := p.Session()
+		session, err := p.getSession()
 		if err != nil {
 			return portalError(err)
 		}
@@ -189,7 +193,7 @@ func scrollHandler(p *Portal) server.ToolHandlerFunc {
 		dx := request.GetFloat("dx", 0)
 		dy := request.GetFloat("dy", 0)
 
-		if err := session.Scroll(dx, dy); err != nil {
+		if err := session.scroll(dx, dy); err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to scroll: %v", err),
 			), nil
@@ -199,6 +203,7 @@ func scrollHandler(p *Portal) server.ToolHandlerFunc {
 	}
 }
 
+// systemInfoHandler returns a handler for the "get_system_info" tool.
 func systemInfoHandler() server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
@@ -234,12 +239,13 @@ func systemInfoHandler() server.ToolHandlerFunc {
 	}
 }
 
-func typeTextHandler(p *Portal) server.ToolHandlerFunc {
+// typeTextHandler returns a handler for the "type_text" tool.
+func typeTextHandler(p *portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		session, err := p.Session()
+		session, err := p.getSession()
 		if err != nil {
 			return portalError(err)
 		}
@@ -257,12 +263,12 @@ func typeTextHandler(p *Portal) server.ToolHandlerFunc {
 			case '\t':
 				keysym = 0xFF09 // XK_Tab
 			}
-			if err := session.TypeKey(keysym, 1); err != nil {
+			if err := session.typeKey(keysym, 1); err != nil {
 				return mcp.NewToolResultError(
 					fmt.Sprintf("Failed to type key: %v", err),
 				), nil
 			}
-			if err := session.TypeKey(keysym, 0); err != nil {
+			if err := session.typeKey(keysym, 0); err != nil {
 				return mcp.NewToolResultError(
 					fmt.Sprintf("Failed to release key: %v", err),
 				), nil
@@ -273,12 +279,13 @@ func typeTextHandler(p *Portal) server.ToolHandlerFunc {
 	}
 }
 
-func pressKeyHandler(p *Portal) server.ToolHandlerFunc {
+// pressKeyHandler returns a handler for the "press_key" tool.
+func pressKeyHandler(p *portal) server.ToolHandlerFunc {
 	return func(
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		session, err := p.Session()
+		session, err := p.getSession()
 		if err != nil {
 			return portalError(err)
 		}
@@ -314,7 +321,7 @@ func pressKeyHandler(p *Portal) server.ToolHandlerFunc {
 		var lastErr error
 		pressedMods := 0
 		for _, m := range mods {
-			if err := session.TypeKey(m, 1); err != nil {
+			if err := session.typeKey(m, 1); err != nil {
 				lastErr = err
 				break
 			}
@@ -323,11 +330,11 @@ func pressKeyHandler(p *Portal) server.ToolHandlerFunc {
 
 		if lastErr == nil {
 			// Press key
-			if err := session.TypeKey(keySym, 1); err != nil {
+			if err := session.typeKey(keySym, 1); err != nil {
 				lastErr = err
 			} else {
 				// Release key
-				if err := session.TypeKey(keySym, 0); err != nil {
+				if err := session.typeKey(keySym, 0); err != nil {
 					lastErr = err
 				}
 			}
@@ -335,7 +342,7 @@ func pressKeyHandler(p *Portal) server.ToolHandlerFunc {
 
 		// Release modifiers in reverse order (best effort)
 		for i := pressedMods - 1; i >= 0; i-- {
-			if err := session.TypeKey(mods[i], 0); err != nil && lastErr == nil {
+			if err := session.typeKey(mods[i], 0); err != nil && lastErr == nil {
 				lastErr = err
 			}
 		}
@@ -391,6 +398,8 @@ func keysymFromName(name string) uint32 {
 	return 0
 }
 
+// portalError is a helper that wraps initialization/readiness errors into
+// a tool result error.
 func portalError(err error) (*mcp.CallToolResult, error) {
 	return mcp.NewToolResultError(
 		fmt.Sprintf("Portal not available: %v", err),
