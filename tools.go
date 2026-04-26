@@ -116,11 +116,12 @@ func screenshotHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		if err := p.Ready(); err != nil {
+		session, err := p.Session()
+		if err != nil {
 			return portalError(err)
 		}
 
-		data, err := p.Screenshot()
+		data, err := session.Screenshot()
 		if err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to take screenshot: %v", err),
@@ -139,7 +140,8 @@ func clickHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		if err := p.Ready(); err != nil {
+		session, err := p.Session()
+		if err != nil {
 			return portalError(err)
 		}
 
@@ -151,20 +153,20 @@ func clickHandler(p *Portal) server.ToolHandlerFunc {
 
 		button := uint32(request.GetFloat("button", 1))
 
-		if err := p.MovePointer(x, y); err != nil {
+		if err := session.MovePointer(x, y); err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to move pointer: %v", err),
 			), nil
 		}
 
 		// Press
-		if err := p.Click(button, 1); err != nil {
+		if err := session.Click(button, 1); err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to press button: %v", err),
 			), nil
 		}
 		// Release
-		if err := p.Click(button, 0); err != nil {
+		if err := session.Click(button, 0); err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to release button: %v", err),
 			), nil
@@ -179,14 +181,15 @@ func scrollHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		if err := p.Ready(); err != nil {
+		session, err := p.Session()
+		if err != nil {
 			return portalError(err)
 		}
 
 		dx := request.GetFloat("dx", 0)
 		dy := request.GetFloat("dy", 0)
 
-		if err := p.Scroll(dx, dy); err != nil {
+		if err := session.Scroll(dx, dy); err != nil {
 			return mcp.NewToolResultError(
 				fmt.Sprintf("Failed to scroll: %v", err),
 			), nil
@@ -236,7 +239,8 @@ func typeTextHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		if err := p.Ready(); err != nil {
+		session, err := p.Session()
+		if err != nil {
 			return portalError(err)
 		}
 
@@ -253,12 +257,12 @@ func typeTextHandler(p *Portal) server.ToolHandlerFunc {
 			case '\t':
 				keysym = 0xFF09 // XK_Tab
 			}
-			if err := p.TypeKey(keysym, 1); err != nil {
+			if err := session.TypeKey(keysym, 1); err != nil {
 				return mcp.NewToolResultError(
 					fmt.Sprintf("Failed to type key: %v", err),
 				), nil
 			}
-			if err := p.TypeKey(keysym, 0); err != nil {
+			if err := session.TypeKey(keysym, 0); err != nil {
 				return mcp.NewToolResultError(
 					fmt.Sprintf("Failed to release key: %v", err),
 				), nil
@@ -274,7 +278,8 @@ func pressKeyHandler(p *Portal) server.ToolHandlerFunc {
 		ctx context.Context,
 		request mcp.CallToolRequest,
 	) (*mcp.CallToolResult, error) {
-		if err := p.Ready(); err != nil {
+		session, err := p.Session()
+		if err != nil {
 			return portalError(err)
 		}
 
@@ -306,18 +311,39 @@ func pressKeyHandler(p *Portal) server.ToolHandlerFunc {
 		}
 
 		// Press modifiers
+		var lastErr error
+		pressedMods := 0
 		for _, m := range mods {
-			p.TypeKey(m, 1)
+			if err := session.TypeKey(m, 1); err != nil {
+				lastErr = err
+				break
+			}
+			pressedMods++
 		}
 
-		// Press key
-		p.TypeKey(keySym, 1)
-		// Release key
-		p.TypeKey(keySym, 0)
+		if lastErr == nil {
+			// Press key
+			if err := session.TypeKey(keySym, 1); err != nil {
+				lastErr = err
+			} else {
+				// Release key
+				if err := session.TypeKey(keySym, 0); err != nil {
+					lastErr = err
+				}
+			}
+		}
 
-		// Release modifiers in reverse order
-		for i := len(mods) - 1; i >= 0; i-- {
-			p.TypeKey(mods[i], 0)
+		// Release modifiers in reverse order (best effort)
+		for i := pressedMods - 1; i >= 0; i-- {
+			if err := session.TypeKey(mods[i], 0); err != nil && lastErr == nil {
+				lastErr = err
+			}
+		}
+
+		if lastErr != nil {
+			return mcp.NewToolResultError(
+				fmt.Sprintf("Failed to press key sequence: %v", lastErr),
+			), nil
 		}
 
 		return mcp.NewToolResultText("Key pressed successfully"), nil
