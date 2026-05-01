@@ -1,12 +1,11 @@
 # Wayland Computer Use MCP Server
 
-A high-performance, self-contained MCP (Model Context Protocol) server for Linux Wayland environments. It enables AI agents to interact with the desktop (viewing the screen and simulating input) without requiring root privileges or external tools.
+An MCP server for controlling Linux desktops running Wayland.  
+It requires no root access and depends exclusively on GStreamer at runtime. 
 
-## Features
+![Demo](assets/screencast.gif)
 
-- **Non-Root**: Works within user session privileges using XDG Desktop Portals.
-- **Wayland Native**: Designed specifically for Wayland (GNOME, KDE, Sway, etc.).
-- **Minimal Dependencies**: Single Go binary; only requires GStreamer at runtime for screen capture.
+> **Note:** This is a weekend project and has only been tested on Ubuntu 26.04 with GNOME. Use at your own peril.
 
 ## Tools Provided
 
