@@ -18,3 +18,4 @@ It requires no root access and depends exclusively on GStreamer at runtime.
 | `scroll` | Simulates mouse wheel scrolling (horizontal/vertical). |
 | `type_text` | Simulates typing a string of text. |
 | `press_key` | Simulates specific keys (e.g., `Enter`, `Escape`) with optional modifiers. |
+| `reset_screen_permission` | Resets the saved ScreenCast permission token to force a new screen selection prompt. |
